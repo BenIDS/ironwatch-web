@@ -153,11 +153,128 @@ async function scrapeMascus(keywords) {
   return listings;
 }
 
-// ─── BIDSPOTTER ────────────────────────────────────────────────────────────────
-// Scrape individual catalogue pages which contain real static lot data with numbers
-// Catalogue URL pattern: /en-gb/auction-catalogues/[auctioneer]/catalogue-id-[id]
-// Lot URL pattern: /en-gb/auction-catalogues/[auctioneer]/catalogue-id-[id]/lot-id-[n]
+// ─── BIDSPOTTER (via Apify) ────────────────────────────────────────────────────
+// Uses getdataforme/bidspotter-auctions-scraper actor on Apify
+// Requires APIFY_TOKEN environment variable on Render
 async function scrapeBidspotter(keywords) {
+  const listings = [];
+  const APIFY_TOKEN = process.env.APIFY_TOKEN;
+
+  if (!APIFY_TOKEN) {
+    console.log('Bidspotter: no APIFY_TOKEN set, skipping');
+    return listings;
+  }
+
+  try {
+    // Start the actor run with UK plant machinery search URLs
+    const startUrls = [
+      { url: 'https://www.bidspotter.co.uk/en-gb/for-sale/plant-and-machinery/excavators' },
+      { url: 'https://www.bidspotter.co.uk/en-gb/for-sale/plant-and-machinery/telehandlers' },
+      { url: 'https://www.bidspotter.co.uk/en-gb/for-sale/plant-and-machinery/dumpers' },
+      { url: 'https://www.bidspotter.co.uk/en-gb/for-sale/plant-and-machinery/loaders' },
+    ];
+
+    console.log('Bidspotter: starting Apify actor run...');
+    const runRes = await fetch(
+      `https://api.apify.com/v2/acts/getdataforme~bidspotter-auctions-scraper/runs?token=${APIFY_TOKEN}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          startUrls,
+          maxItems: 100,
+          proxyConfiguration: { useApifyProxy: true },
+        }),
+        signal: AbortSignal.timeout(30000),
+      }
+    );
+
+    if (!runRes.ok) {
+      console.log(`Bidspotter: Apify run start failed: ${runRes.status}`);
+      return listings;
+    }
+
+    const runData = await runRes.json();
+    const runId = runData.data?.id;
+    if (!runId) { console.log('Bidspotter: no run ID returned'); return listings; }
+    console.log(`Bidspotter: actor run started, id=${runId}`);
+
+    // Poll until finished (timeout after 3 minutes)
+    const deadline = Date.now() + 3 * 60 * 1000;
+    let status = 'RUNNING';
+    while (status === 'RUNNING' || status === 'READY') {
+      if (Date.now() > deadline) { console.log('Bidspotter: Apify run timed out'); break; }
+      await delay(8000);
+      const statusRes = await fetch(
+        `https://api.apify.com/v2/actor-runs/${runId}?token=${APIFY_TOKEN}`,
+        { signal: AbortSignal.timeout(10000) }
+      );
+      const statusData = await statusRes.json();
+      status = statusData.data?.status;
+      console.log(`Bidspotter: actor status = ${status}`);
+    }
+
+    if (status !== 'SUCCEEDED') {
+      console.log(`Bidspotter: actor did not succeed (status=${status})`);
+      return listings;
+    }
+
+    // Fetch results from the dataset
+    const datasetId = runData.data?.defaultDatasetId;
+    const itemsRes = await fetch(
+      `https://api.apify.com/v2/datasets/${datasetId}/items?token=${APIFY_TOKEN}&format=json&limit=200`,
+      { signal: AbortSignal.timeout(15000) }
+    );
+    const items = await itemsRes.json();
+    console.log(`Bidspotter: actor returned ${items.length} raw items`);
+
+    for (const item of items) {
+      // Map Apify output fields to our listing format
+      // Common field names from auction scrapers: title, name, price, currentBid, url, link, year, hours, location
+      const title = item.title || item.name || item.lotTitle || '';
+      if (!title || !isRelevant(title)) continue;
+
+      const priceRaw = item.price || item.currentBid || item.startingBid || item.estimatedPrice || 0;
+      const price = typeof priceRaw === 'string'
+        ? parseInt(priceRaw.replace(/[^0-9]/g, '')) || 0
+        : (priceRaw || 0);
+
+      const listingUrl = item.url || item.link || item.lotUrl || 'https://www.bidspotter.co.uk';
+      const yearMatch = String(title).match(/\b(20\d{2})\b/);
+      const hoursMatch = String(item.hours || item.hoursUsed || title).match(/([\d,]+)\s*(?:hours?|hrs?)\b/i);
+      const location = item.location || item.saleLocation || item.auctionLocation || 'UK';
+
+      listings.push({
+        id: nextId(),
+        title: String(title).slice(0, 80),
+        platform: 'bidspotter',
+        price,
+        location: String(location).slice(0, 50),
+        lat: 52.5 + (Math.random() - 0.5) * 4,
+        lng: -1.5 + (Math.random() - 0.5) * 4,
+        endsAt: item.endDate ? new Date(item.endDate) : new Date(Date.now() + (24 + Math.random() * 120) * 3600000),
+        relevanceScore: scoreRelevance(title),
+        condition: item.condition || 'Good',
+        conditionScore: 3,
+        year: yearMatch ? parseInt(yearMatch[1]) : (item.year ? parseInt(item.year) : null),
+        hours: hoursMatch ? parseInt(hoursMatch[1].replace(/,/g, '')) : (item.hours ? parseInt(item.hours) : null),
+        isNew: true,
+        imageColor: '#E8500A',
+        listingUrl,
+        source: 'live',
+      });
+    }
+
+  } catch (err) {
+    console.error('Bidspotter Apify error:', err.message);
+  }
+
+  console.log(`Bidspotter: found ${listings.length} relevant listings`);
+  return listings;
+}
+
+// ─── BIDSPOTTER LEGACY (unused — kept for reference) ──────────────────────────
+async function scrapeBidspotterLegacy(keywords) {
   const listings = [];
 
   // Known active UK plant & machinery auction catalogues
@@ -258,7 +375,7 @@ async function scrapeBidspotter(keywords) {
     await delay(1500);
   }
 
-  console.log(`Bidspotter: found ${listings.length} listings`);
+  console.log(`Bidspotter legacy: found ${listings.length} listings`);
   return listings;
 }
 
@@ -444,6 +561,101 @@ async function scrapeRitchieBros(keywords) {
   return listings;
 }
 
+// ─── GUMTREE ───────────────────────────────────────────────────────────────────
+// Gumtree plant & tractors section - pure static HTML, prices and URLs in page source
+// URL pattern: /p/plant-tractors/[slug]/[id]
+// Price pattern: £5,000 as link text immediately before the href
+async function scrapeGumtree(keywords) {
+  const listings = [];
+  const urls = [
+    'https://www.gumtree.com/cars-vans-motorbikes/plant-tractors/uk/srpsearch+excavator',
+    'https://www.gumtree.com/cars-vans-motorbikes/plant-tractors/uk/srpsearch+digger',
+    'https://www.gumtree.com/cars-vans-motorbikes/plant-tractors/uk/srpsearch+jcb',
+    'https://www.gumtree.com/cars-vans-motorbikes/plant-tractors/uk/srpsearch+komatsu',
+    'https://www.gumtree.com/cars-vans-motorbikes/plant-tractors/uk/srpsearch+telehandler',
+  ];
+
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          ...HEADERS,
+          'Referer': 'https://www.gumtree.com/',
+          'Sec-Fetch-Site': 'same-origin',
+        },
+        signal: AbortSignal.timeout(15000)
+      });
+      if (!res.ok) { console.log(`Gumtree ${url}: HTTP ${res.status}`); continue; }
+      const html = await res.text();
+
+      // Gumtree listing cards follow this pattern in static HTML:
+      // <a href="/p/plant-tractors/SLUG/ID"> ... TITLE ... £PRICE </a>
+      // Each card: href="/p/plant-tractors/..." contains title text and price
+      const cardRe = /href="(\/p\/plant-tractors\/[^"]+\/(\d{7,}))"[^>]*>([\s\S]{10,600}?)(?=href="\/p\/plant-tractors|$)/g;
+      let m;
+      while ((m = cardRe.exec(html)) !== null) {
+        const path = m[1];
+        const block = m[3];
+
+        // Extract title from block - it's the main text content before the price
+        const plainBlock = stripTags(block).replace(/\s+/g, ' ').trim();
+
+        // Price: £ followed by digits/commas
+        const priceMatch = plainBlock.match(/£\s*([\d,]+)/);
+        const price = priceMatch ? parseInt(priceMatch[1].replace(/,/g, '')) : 0;
+
+        // Skip hire/services (very low prices are hire fees not sales)
+        if (price > 0 && price < 500) continue;
+
+        // Title: text before the price, cleaned up
+        let title = plainBlock.replace(/£[\d,]+.*$/, '').replace(/^\d+\s*/, '').trim();
+        // Remove "Featured", photo counts like "4", "Private", location strings
+        title = title.replace(/^(Featured\s*\d*|\d+\s*)/i, '').trim();
+        title = title.replace(/\s*(Private|Dealer)\s*$/i, '').trim();
+
+        if (title.length < 5 || !isRelevant(title)) continue;
+        if (listings.some(l => l.listingUrl.includes(m[2]))) continue;
+
+        // Extract location — Gumtree shows "City, County" after seller type
+        const locationMatch = plainBlock.match(/(?:Private|Dealer)\s+([A-Z][a-zA-Z\s]+,\s*[A-Za-z\s]+)/);
+        const location = locationMatch ? locationMatch[1].trim() : 'UK';
+
+        // Year from title
+        const yearMatch = title.match(/\b(20\d{2}|19\d{2})\b/);
+        // Hours from title
+        const hoursMatch = title.match(/([\d,]+)\s*(?:hours?|hrs?)\b/i);
+
+        listings.push({
+          id: nextId(),
+          title: title.slice(0, 80),
+          platform: 'gumtree',
+          price,
+          location,
+          lat: 52.5 + (Math.random() - 0.5) * 5,
+          lng: -1.5 + (Math.random() - 0.5) * 5,
+          endsAt: new Date(Date.now() + (72 + Math.random() * 336) * 3600000), // classifieds last 2-3 weeks
+          relevanceScore: scoreRelevance(title),
+          condition: 'Good', conditionScore: 3,
+          year: yearMatch ? parseInt(yearMatch[1]) : null,
+          hours: hoursMatch ? parseInt(hoursMatch[1].replace(/,/g, '')) : null,
+          isNew: true, imageColor: '#006B5B',
+          listingUrl: 'https://www.gumtree.com' + path,
+          source: 'live',
+        });
+
+        if (listings.length >= 60) break;
+      }
+
+    } catch (err) {
+      console.error(`Gumtree error (${url}):`, err.message);
+    }
+    await delay(1500);
+  }
+
+  console.log(`Gumtree: found ${listings.length} listings`);
+  return listings;
+}
+
 // ─── CACHE ─────────────────────────────────────────────────────────────────────
 let cachedListings = [];
 let lastScrapeTime = 0;
@@ -462,7 +674,7 @@ async function scrapeAll(keywords = [], forceRefresh = false) {
     scrapeMascus(keywords),
     scrapeBidspotter(keywords),
     scrapeEuroAuctions(keywords),
-    scrapeRitchieBros(keywords),
+    scrapeGumtree(keywords),
   ]);
 
   const allListings = results
@@ -485,7 +697,7 @@ async function scrapeAll(keywords = [], forceRefresh = false) {
     mascus: results[0].status === 'fulfilled' ? results[0].value.length : 0,
     bidspotter: results[1].status === 'fulfilled' ? results[1].value.length : 0,
     euroauctions: results[2].status === 'fulfilled' ? results[2].value.length : 0,
-    ritchie: results[3].status === 'fulfilled' ? results[3].value.length : 0,
+    gumtree: results[3].status === 'fulfilled' ? results[3].value.length : 0,
   };
 
   console.log(`Scrape complete. Found: ${JSON.stringify(perPlatform)}. Total: ${deduped.length}`);
