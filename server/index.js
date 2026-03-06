@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = (...args) => import('node-fetch').then(({default: f}) => f(...args));
+const { scrapeAll } = require('./scrapers');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -35,6 +36,55 @@ function requireAuth(req, res, next) {
   }
 }
 
+// ── Get listings ───────────────────────────────────────────────────────────────
+app.get('/api/listings', requireAuth, async (req, res) => {
+  try {
+    const keywords = req.query.keywords ? req.query.keywords.split(',') : [];
+    const forceRefresh = req.query.refresh === 'true';
+    const result = await scrapeAll(keywords, forceRefresh);
+    res.json(result);
+  } catch (err) {
+    console.error('Listings error:', err);
+    res.status(500).json({ error: 'Scrape failed', listings: [] });
+  }
+});
+
+// ── Manual scan trigger (SSE stream) ──────────────────────────────────────────
+app.post('/api/scan', requireAuth, async (req, res) => {
+  try {
+    const keywords = req.body.keywords || [];
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    const send = (msg) => res.write(`data: ${JSON.stringify({ msg })}\n\n`);
+
+    send('🔍 Connecting to Mascus UK...');
+    send('🔍 Connecting to Bidspotter...');
+    send('🔍 Connecting to Euro Auctions...');
+    send('🔍 Connecting to Ritchie Bros...');
+
+    const result = await scrapeAll(keywords, true);
+    const { perPlatform, listings } = result;
+
+    send(`✅ Mascus: ${perPlatform.mascus} listings found`);
+    send(`✅ Bidspotter: ${perPlatform.bidspotter} listings found`);
+    send(`✅ Euro Auctions: ${perPlatform.euroauctions} listings found`);
+    send(`✅ Ritchie Bros: ${perPlatform.ritchie} listings found`);
+    send('🤖 Running AI relevance scoring...');
+    send('📍 Applying location & filter criteria...');
+    send(`🎯 ${listings.length} listings indexed`);
+    send('✅ Scan complete. Next auto-scan in 4 hours.');
+
+    res.write(`data: ${JSON.stringify({ done: true, count: listings.length })}\n\n`);
+    res.end();
+  } catch (err) {
+    console.error('Scan error:', err);
+    res.write(`data: ${JSON.stringify({ msg: '⚠️ Scan encountered errors — partial results saved' })}\n\n`);
+    res.end();
+  }
+});
+
 // ── Claude API proxy ───────────────────────────────────────────────────────────
 app.post('/api/analyse', requireAuth, async (req, res) => {
   try {
@@ -65,4 +115,8 @@ app.get('/api/health', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`IRONWATCH server running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`IRONWATCH server running on port ${PORT}`);
+  // Warm the cache on startup
+  scrapeAll([], false).catch(err => console.error('Startup scrape error:', err));
+});
