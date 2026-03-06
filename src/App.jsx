@@ -214,7 +214,7 @@ function PhotoAnalyser({ token }) {
   }
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }} className="iw-photo-grid">
       <div style={{ background: "#0D1017", border: "1px solid #1E2535", padding: 20 }}>
         <div style={{ fontSize: 11, letterSpacing: "0.15em", color: "#5A6478", marginBottom: 16 }}>📷 UPLOAD MACHINE PHOTOGRAPH</div>
         <div onDrop={e => { e.preventDefault(); setDragOver(false); handleFile(e.dataTransfer.files[0]); }} onDragOver={e => { e.preventDefault(); setDragOver(true); }} onDragLeave={() => setDragOver(false)} onClick={() => fileRef.current.click()}
@@ -250,6 +250,7 @@ function PhotoAnalyser({ token }) {
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem("ironwatch_token"));
   const [activeTab, setActiveTab] = useState("dashboard");
+  const [filterOpen, setFilterOpen] = useState(false);
   const [listings] = useState(MOCK_LISTINGS);
   const [searchTerms, setSearchTerms] = useState(["excavator", "wheel loader", "backhoe", "crane", "bulldozer"]);
   const [newTerm, setNewTerm] = useState("");
@@ -352,40 +353,53 @@ export default function App() {
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ width: 34, height: 34, background: "#FF6B00", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>⚙</div>
           <div>
-            <div style={{ fontFamily: "'Bebas Neue',sans-serif", fontSize: 22, letterSpacing: "0.1em", color: "#FF6B00", lineHeight: 1 }}>IRONWATCH</div>
-            <div style={{ fontSize: 9, color: "#3A4458", letterSpacing: "0.15em" }}>PLANT & MACHINERY AUCTION INTELLIGENCE</div>
+            <div className="iw-header-title" style={{ fontFamily: "'Bebas Neue',sans-serif", fontSize: 22, letterSpacing: "0.1em", color: "#FF6B00", lineHeight: 1 }}>IRONWATCH</div>
+            <div className="iw-header-sub" style={{ fontSize: 9, color: "#8A9AB8", letterSpacing: "0.15em" }}>PLANT & MACHINERY AUCTION INTELLIGENCE</div>
           </div>
         </div>
-        <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
-          {endingSoon.length > 0 && <div style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(220,60,30,0.12)", border: "1px solid rgba(220,60,30,0.35)", padding: "5px 12px", fontSize: 10, color: "#FF4444" }}><span className="pulse">●</span> {endingSoon.length} ENDING SOON</div>}
-          <div style={{ fontSize: 10, color: "#3A4458" }}>{filtered.length}/{listings.length} SHOWN</div>
-          <button className="abtn" onClick={runScan} disabled={scanning} style={{ background: scanning ? "#1E2535" : "#FF6B00", color: scanning ? "#5A6478" : "#000", padding: "7px 16px", fontSize: 10, fontFamily: "'DM Mono',monospace", fontWeight: 500, letterSpacing: "0.1em", border: "none" }}>
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          {endingSoon.length > 0 && <div className="iw-header-ending" style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(220,60,30,0.12)", border: "1px solid rgba(220,60,30,0.35)", padding: "5px 12px", fontSize: 10, color: "#FF4444" }}><span className="pulse">●</span> {endingSoon.length} ENDING</div>}
+          <div className="iw-header-count" style={{ fontSize: 10, color: "#3A4458" }}>{filtered.length}/{listings.length} SHOWN</div>
+          <button className="abtn iw-header-scan" onClick={runScan} disabled={scanning} style={{ background: scanning ? "#1E2535" : "#FF6B00", color: scanning ? "#5A6478" : "#000", padding: "7px 16px", fontSize: 10, fontFamily: "'DM Mono',monospace", fontWeight: 500, letterSpacing: "0.1em", border: "none" }}>
             {scanning ? "SCANNING..." : "▶ RUN SCAN"}
           </button>
-          <button onClick={logout} style={{ background: "transparent", border: "1px solid #1E2535", color: "#5A6478", padding: "7px 12px", fontSize: 9, fontFamily: "'DM Mono',monospace", letterSpacing: "0.1em", cursor: "pointer" }}>LOGOUT</button>
+          <button className="iw-header-logout" onClick={logout} style={{ background: "transparent", border: "1px solid #1E2535", color: "#5A6478", padding: "7px 12px", fontSize: 9, fontFamily: "'DM Mono',monospace", letterSpacing: "0.1em", cursor: "pointer" }}>LOGOUT</button>
         </div>
       </div>
 
       {/* Tabs */}
-      <div style={{ background: "#0D1017", borderBottom: "1px solid #1E2535", display: "flex", padding: "0 24px", overflowX: "auto", flexShrink: 0 }}>
+      <div className="iw-tabs" style={{ background: "#0D1017", borderBottom: "1px solid #1E2535", display: "flex", padding: "0 24px", overflowX: "auto", flexShrink: 0 }}>
         {tabs.map(t => (
-          <button key={t.id} className="tab-btn" onClick={() => setActiveTab(t.id)} style={{ background: activeTab === t.id ? "rgba(255,107,0,0.1)" : "transparent", color: activeTab === t.id ? "#FF6B00" : "#5A6478", borderBottom: `2px solid ${activeTab === t.id ? "#FF6B00" : "transparent"}`, padding: "11px 18px", fontSize: 10, letterSpacing: "0.12em", marginBottom: -1, whiteSpace: "nowrap", border: "none", cursor: "pointer" }}>
+          <button key={t.id} className="tab-btn" onClick={() => setActiveTab(t.id)} style={{ background: activeTab === t.id ? "rgba(255,107,0,0.1)" : "transparent", color: activeTab === t.id ? "#FF6B00" : "#8A9AB8", borderBottom: `2px solid ${activeTab === t.id ? "#FF6B00" : "transparent"}`, padding: "11px 18px", fontSize: 10, letterSpacing: "0.12em", marginBottom: -1, whiteSpace: "nowrap", border: "none", cursor: "pointer" }}>
             {t.icon} {t.label.toUpperCase()}
           </button>
         ))}
       </div>
 
+      {/* Bottom nav — mobile only */}
+      <div className="iw-bottom-nav">
+        {[{ id: "dashboard", icon: "◈", label: "HOME" }, { id: "listings", icon: "⊞", label: "LISTINGS" }, { id: "photo", icon: "📷", label: "PHOTO" }, { id: "analyse", icon: "◎", label: "AI" }, { id: "settings", icon: "⚙", label: "SETTINGS" }].map(t => (
+          <button key={t.id} className={activeTab === t.id ? "active" : ""} onClick={() => { setActiveTab(t.id); setFilterOpen(false); }}>
+            <span className="nav-icon">{t.icon}</span>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Filter overlay backdrop — mobile only */}
+      <div className={`iw-filter-backdrop ${filterOpen ? "open" : ""}`} onClick={() => setFilterOpen(false)} />
+
       {/* Content */}
-      <div style={{ padding: 24, maxWidth: 1260, margin: "0 auto", width: "100%", flex: 1, overflowY: "auto" }}>
+      <div className="iw-content" style={{ padding: 24, maxWidth: 1260, margin: "0 auto", width: "100%", flex: 1, overflowY: "auto" }}>
 
         {/* DASHBOARD */}
         {activeTab === "dashboard" && (
           <div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14, marginBottom: 22 }}>
+            <div className="iw-kpi-grid" style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14, marginBottom: 22 }}>
               {[{ label: "ACTIVE LISTINGS", value: listings.length, sub: `${newToday.length} new today`, accent: "#FF6B00" }, { label: "FILTERED RESULTS", value: filtered.length, sub: "matching criteria", accent: "#6B8FFF" }, { label: "ENDING < 24H", value: endingSoon.length, sub: "Require attention", accent: "#FF4444" }, { label: "AVG RELEVANCE", value: `${Math.round(listings.reduce((a, b) => a + b.relevanceScore, 0) / listings.length)}%`, sub: "AI scored", accent: "#00C896" }].map(k => (
                 <div key={k.label} style={{ background: "#0D1017", border: "1px solid #1E2535", padding: "16px 18px" }}>
                   <div style={{ fontSize: 9, color: "#5A6478", letterSpacing: "0.15em", marginBottom: 6 }}>{k.label}</div>
-                  <div style={{ fontFamily: "'Bebas Neue',sans-serif", fontSize: 34, color: k.accent, lineHeight: 1 }}>{k.value}</div>
+                  <div className="iw-kpi-value" style={{ fontFamily: "'Bebas Neue',sans-serif", fontSize: 34, color: k.accent, lineHeight: 1 }}>{k.value}</div>
                   <div style={{ fontSize: 9, color: "#5A6478", marginTop: 4 }}>{k.sub}</div>
                 </div>
               ))}
@@ -411,7 +425,7 @@ export default function App() {
                 ))}
               </div>
             )}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+            <div className="iw-bottom-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
               <div style={{ background: "#0D1017", border: "1px solid #1E2535", padding: "18px 20px" }}>
                 <div style={{ fontSize: 10, letterSpacing: "0.15em", color: "#5A6478", marginBottom: 14 }}>PLATFORM ACTIVITY</div>
                 {PLATFORMS.map(p => { const count = listings.filter(l => l.platform === p.id).length; if (!count) return null; return (<div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 9 }}><div style={{ width: 7, height: 7, borderRadius: "50%", background: p.color, flexShrink: 0 }} /><div style={{ fontSize: 11, width: 100, color: "#A0A8B8" }}>{p.name}</div><div style={{ flex: 1, background: "#1E2535", height: 3, borderRadius: 2 }}><div style={{ width: `${(count / listings.length) * 100}%`, background: p.color, height: "100%", borderRadius: 2 }} /></div><div style={{ fontSize: 11, color: "#5A6478", width: 16, textAlign: "right" }}>{count}</div></div>); })}
@@ -433,8 +447,8 @@ export default function App() {
 
         {/* LISTINGS */}
         {activeTab === "listings" && (
-          <div style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: 20 }}>
-            <div>
+          <div className="iw-listings-grid" style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: 20 }}>
+            <div className={`iw-filter-sidebar ${filterOpen ? "open" : ""}`}>
               <div style={{ background: "#0D1017", border: "1px solid #1E2535", padding: "18px 16px", marginBottom: 14 }}>
                 <div style={{ fontSize: 10, letterSpacing: "0.15em", color: "#FF6B00", marginBottom: 16 }}>📍 LOCATION SEARCH</div>
                 <input value={locationSearch} onChange={e => setLocationSearch(e.target.value)} list="city-list" placeholder="City or region..." style={{ width: "100%", background: "#1A2030", border: "1px solid #1E2535", color: "#E0E4EC", padding: "8px 10px", fontSize: 11, fontFamily: "'DM Mono',monospace", marginBottom: 10 }} />
@@ -473,9 +487,12 @@ export default function App() {
               </div>
             </div>
             <div>
-              <div style={{ fontSize: 10, color: "#5A6478", marginBottom: 14, letterSpacing: "0.1em" }}>{filtered.length} LISTINGS{locationSearch && <span style={{ color: "#FF6B00" }}> · within {radiusMiles}mi of {locationSearch}</span>}</div>
+              <div style={{ fontSize: 10, color: "#5A6478", marginBottom: 14, letterSpacing: "0.1em", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span>{filtered.length} LISTINGS{locationSearch && <span style={{ color: "#FF6B00" }}> · within {radiusMiles}mi of {locationSearch}</span>}</span>
+                <button className="iw-filter-toggle abtn" onClick={() => setFilterOpen(o => !o)} style={{ background: "rgba(255,107,0,0.1)", border: "1px solid rgba(255,107,0,0.25)", color: "#FF6B00", padding: "6px 12px", fontSize: 9, fontFamily: "'DM Mono',monospace", letterSpacing: "0.1em" }}>⊟ FILTERS</button>
+              </div>
               {filtered.length === 0 && <div style={{ textAlign: "center", padding: "60px 0", color: "#3A4458" }}><div style={{ fontFamily: "'Bebas Neue',sans-serif", fontSize: 36, letterSpacing: "0.1em", marginBottom: 8 }}>NO MATCHES</div><div style={{ fontSize: 11 }}>Try adjusting your filters</div></div>}
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 12 }}>
+              <div className="iw-cards-grid" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 12 }}>
                 {filtered.map(listing => {
                   const plat = getPlatform(listing.platform);
                   const urgent = isEndingSoon(listing.endsAt);
@@ -540,7 +557,7 @@ export default function App() {
                 <div style={{ fontSize: 11 }}>Go to Listings and click "AI Analysis" on any lot</div>
               </div>
             ) : (
-              <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 20 }}>
+              <div className="iw-analysis-grid" style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 20 }}>
                 <div style={{ background: "#0D1017", border: "1px solid #1E2535", padding: 18 }}>
                   <div style={{ height: 4, background: `linear-gradient(90deg, ${selectedListing.imageColor}, ${getPlatform(selectedListing.platform).color})`, marginBottom: 14 }} />
                   <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 12, lineHeight: 1.4 }}>{selectedListing.title}</div>
@@ -575,7 +592,7 @@ export default function App() {
 
         {/* SETTINGS */}
         {activeTab === "settings" && (
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
+          <div className="iw-settings-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
             <div style={{ background: "#0D1017", border: "1px solid #1E2535", padding: 20 }}>
               <div style={{ fontSize: 10, letterSpacing: "0.15em", color: "#5A6478", marginBottom: 14 }}>SEARCH KEYWORDS</div>
               <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
