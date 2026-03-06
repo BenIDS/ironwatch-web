@@ -276,7 +276,10 @@ export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem("ironwatch_token"));
   const [activeTab, setActiveTab] = useState("dashboard");
   const [filterOpen, setFilterOpen] = useState(false);
-  const [listings] = useState(MOCK_LISTINGS);
+  const [listings, setListings] = useState(MOCK_LISTINGS);
+  const [listingsLoading, setListingsLoading] = useState(false);
+  const [listingsSource, setListingsSource] = useState("mock");
+  const [lastUpdated, setLastUpdated] = useState(null);
   const [searchTerms, setSearchTerms] = useState(["excavator", "wheel loader", "backhoe", "crane", "bulldozer"]);
   const [newTerm, setNewTerm] = useState("");
   const [filterPlatform, setFilterPlatform] = useState("all");
@@ -294,6 +297,32 @@ export default function App() {
   const [scanning, setScanning] = useState(false);
   const [scanLog, setScanLog] = useState([]);
   const [emailConfig, setEmailConfig] = useState({ email: "pm@yourcompany.com", alertHours: 24 });
+
+  // Fetch live listings on load
+  useEffect(() => {
+    if (!token) return;
+    fetchListings(false);
+  }, [token]);
+
+  async function fetchListings(forceRefresh = false) {
+    setListingsLoading(true);
+    try {
+      const kw = searchTerms.join(',');
+      const res = await fetch(`${API_BASE}/listings?keywords=${encodeURIComponent(kw)}&refresh=${forceRefresh}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.status === 401) { logout(); return; }
+      const data = await res.json();
+      if (data.listings && data.listings.length > 0) {
+        setListings(data.listings.map(l => ({ ...l, endsAt: new Date(l.endsAt) })));
+        setListingsSource(data.fromCache ? 'cache' : 'live');
+        setLastUpdated(data.lastUpdated ? new Date(data.lastUpdated) : new Date());
+      }
+    } catch (err) {
+      console.error('Failed to fetch listings:', err);
+    }
+    setListingsLoading(false);
+  }
 
   if (!token) return <LoginScreen onLogin={setToken} />;
 
@@ -346,8 +375,30 @@ export default function App() {
 
   async function runScan() {
     setScanning(true); setScanLog([]);
-    const steps = ["🔍 Connecting to Ritchie Bros...", "✅ Ritchie Bros: 847 active lots", "🔍 Connecting to Euro Auctions...", "✅ Euro Auctions: 312 active lots", "🔍 Connecting to Bidspotter...", "✅ Bidspotter: 1,204 active lots", "🔍 Connecting to Mascus...", "✅ Mascus: 2,891 active lots", "🔍 Connecting to eBay...", "✅ eBay: 4,103 active lots", "🤖 Running AI relevance scoring...", "📍 Applying location & filter criteria...", "🎯 10 high-relevance matches identified", "📧 Morning report queued for 07:00", "✅ Scan complete. Next scan in 4 hours."];
-    for (const step of steps) { await new Promise(r => setTimeout(r, 380)); setScanLog(prev => [...prev, step]); }
+    try {
+      const res = await fetch(`${API_BASE}/scan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ keywords: searchTerms })
+      });
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n').filter(l => l.startsWith('data:'));
+        for (const line of lines) {
+          try {
+            const json = JSON.parse(line.replace('data:', '').trim());
+            if (json.msg) setScanLog(prev => [...prev, json.msg]);
+            if (json.done) await fetchListings(false);
+          } catch {}
+        }
+      }
+    } catch (err) {
+      setScanLog(prev => [...prev, '⚠️ Scan error — check server logs']);
+    }
     setScanning(false);
   }
 
@@ -384,7 +435,9 @@ export default function App() {
         </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
           {endingSoon.length > 0 && <div className="iw-header-ending" style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(220,60,30,0.12)", border: "1px solid rgba(220,60,30,0.35)", padding: "5px 12px", fontSize: 10, color: "#FF4444" }}><span className="pulse">●</span> {endingSoon.length} ENDING</div>}
-          <div className="iw-header-count" style={{ fontSize: 10, color: "#3A4458" }}>{filtered.length}/{listings.length} SHOWN</div>
+          <div className="iw-header-count" style={{ fontSize: 10, color: "#3A4458" }}>
+            {listingsLoading ? <span style={{ color: "#FF6B00" }}>● LOADING...</span> : <span>{filtered.length}/{listings.length} {listingsSource === 'live' ? <span style={{ color: "#00C896" }}>● LIVE</span> : listingsSource === 'cache' ? '(cached)' : '(demo)'}</span>}
+          </div>
           <button className="abtn iw-header-scan" onClick={runScan} disabled={scanning} style={{ background: scanning ? "#1E2535" : "#FF6B00", color: scanning ? "#5A6478" : "#000", padding: "7px 16px", fontSize: 10, fontFamily: "'DM Mono',monospace", fontWeight: 500, letterSpacing: "0.1em", border: "none" }}>
             {scanning ? "SCANNING..." : "▶ RUN SCAN"}
           </button>
