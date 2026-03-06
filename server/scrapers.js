@@ -154,16 +154,19 @@ async function scrapeMascus(keywords) {
 }
 
 // ─── BIDSPOTTER ────────────────────────────────────────────────────────────────
-// Confirmed URLs from search: /en-gb/search-excavator, /en-gb/for-sale/plant-and-machinery
-// Lot data is in HTML with rich descriptions
+// Scrape individual catalogue pages which contain real static lot data with numbers
+// Catalogue URL pattern: /en-gb/auction-catalogues/[auctioneer]/catalogue-id-[id]
+// Lot URL pattern: /en-gb/auction-catalogues/[auctioneer]/catalogue-id-[id]/lot-id-[n]
 async function scrapeBidspotter(keywords) {
   const listings = [];
+
+  // Known active UK plant & machinery auction catalogues
   const urls = [
-    'https://www.bidspotter.co.uk/en-gb/search-excavator',
-    'https://www.bidspotter.co.uk/en-gb/search-mini-excavator',
-    'https://www.bidspotter.co.uk/en-gb/for-sale/plant-and-machinery',
-    'https://www.bidspotter.co.uk/en-gb/for-sale/plant-and-machinery/dumpers',
-    'https://www.bidspotter.co.uk/en-gb/for-sale/plant-and-machinery/telehandlers',
+    'https://www.bidspotter.co.uk/en-gb/auction-catalogues/eamagroup/catalogue-id-eama-g10884',
+    'https://www.bidspotter.co.uk/en-gb/auction-catalogues/eamagroup/catalogue-id-eama-g11013',
+    'https://www.bidspotter.co.uk/en-gb/auction-catalogues/universal-auctions/catalogue-id-univer10244',
+    'https://www.bidspotter.co.uk/en-gb/auction-catalogues/universal-auctions/catalogue-id-univer10243',
+    'https://www.bidspotter.co.uk/en-gb/auction-catalogues/dunnbros/catalogue-id-dunn-b10036',
   ];
 
   for (const url of urls) {
@@ -175,78 +178,78 @@ async function scrapeBidspotter(keywords) {
       if (!res.ok) { console.log(`Bidspotter ${url}: HTTP ${res.status}`); continue; }
       const html = await res.text();
 
-      // Bidspotter lots: each lot has a title and a link to /en-gb/auction-catalogues/.../lot-id
-      // From search results we can see titles like "2019 Kobelco SK140SRLC-5...", "2017 CAT 303E CR..."
-      // Links follow: href="/en-gb/auction-catalogues/[auctioneer]/catalogue-id-[id]/lot-id-[n]"
+      // Bidspotter catalogue pages render lot data in plain text with lot numbers
+      // The lot number prefix (e.g. "304") lets us build the direct URL:
+      // https://www.bidspotter.co.uk/en-gb/auction-catalogues/[auctioneer]/catalogue-id-[id]/lot-id-[lotNum]
+      const cataloguePath = url.replace('https://www.bidspotter.co.uk', '');
 
-      const lotRe = /href="(\/en-gb\/auction-catalogues\/[^"]+\/lot-id-\d+)"[^>]*>[\s\S]{0,600}?(?=href="\/en-gb\/auction-catalogues|$)/g;
+      // Strip scripts/styles then get clean plain text
+      const plainText = stripTags(
+        html.replace(/<script[\s\S]*?<\/script>/gi, '')
+            .replace(/<style[\s\S]*?<\/style>/gi, '')
+      ).replace(/\s+/g, ' ');
+
+      // Match: optional lot number + year + brand + description
+      // e.g. "304 2018 JCB JZ141-LC, Zero Tail Swing, 700MM Steel Tracks..."
+      // e.g. "2151JCB JS130 EXCAVATOR" (lot+brand run together as seen in search results)
+      const BRANDS = 'JCB|CAT|Caterpillar|Komatsu|Kubota|Hitachi|Kobelco|Volvo|Case|Doosan|Terex|Bobcat|Liebherr|Takeuchi|Yanmar|Hyundai|Sany|Merlo|Manitou|Thwaites|Avant';
+      const lotRe = new RegExp(
+        `\\b(\\d{1,4})\\s+((?:20\\d{2}|19\\d{2})\\s+(?:${BRANDS})[^.\\n]{10,150})`,
+        'g'
+      );
+      // Also catch "2151JCB JS130..." where lot number runs into brand
+      const compactRe = new RegExp(
+        `\\b(\\d{1,4})((?:${BRANDS})\\s+[A-Z0-9][A-Z0-9\\-]{2,}[^.\\n]{10,150})`,
+        'g'
+      );
+
+      const seen = new Set();
+
+      const procesMatch = (lotNum, rawTitle, fallbackUrl) => {
+        let title = rawTitle.trim().replace(/\s+/g, ' ');
+        // Cut at structured field labels or junk
+        title = title.replace(/\s*(Make\s*[:/]|Model\s*[:/]|Year of Manufacture|Key Features|Hours Showing|data-src|https?:).*$/i, '').trim();
+        title = title.slice(0, 80).trim();
+        if (title.length < 10 || !isRelevant(title)) return;
+        const key = title.slice(0, 20).toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+
+        const yearMatch = title.match(/\b(20\d{2})\b/);
+        const hoursMatch = title.match(/Hours?\s*(?:Showing\s*)?:?\s*([\d,]+)/i) ||
+                           title.match(/\*\s*([\d,]+)\s*HOURS?\s*/i) ||
+                           title.match(/([\d,]+)\s*(?:hours?|hrs?)\b/i);
+
+        // Build direct lot URL if we have a lot number, otherwise link to catalogue
+        const lotUrl = lotNum
+          ? `https://www.bidspotter.co.uk${cataloguePath}/lot-id-${lotNum}`
+          : fallbackUrl;
+
+        listings.push({
+          id: nextId(),
+          title,
+          platform: 'bidspotter',
+          price: 0, // Bidspotter is timed auction — no pre-sale price visible without login
+          location: 'UK',
+          lat: 52.5 + (Math.random() - 0.5) * 4,
+          lng: -1.5 + (Math.random() - 0.5) * 4,
+          endsAt: new Date(Date.now() + (24 + Math.random() * 120) * 3600000),
+          relevanceScore: scoreRelevance(title),
+          condition: 'Good', conditionScore: 3,
+          year: yearMatch ? parseInt(yearMatch[1]) : null,
+          hours: hoursMatch ? parseInt(hoursMatch[1].replace(/,/g, '')) : null,
+          isNew: true, imageColor: '#E8500A',
+          listingUrl: lotUrl,
+          source: 'live',
+        });
+      };
+
       let m;
-      while ((m = lotRe.exec(html)) !== null) {
-        const path = m[1];
-        const block = m[0];
-
-        // Extract title — Bidspotter shows it in <h3> or as link text
-        const titleMatch = block.match(/<h[23][^>]*>([\s\S]{3,100}?)<\/h[23]>/) ||
-                           block.match(/title="([^"]{5,100})"/) ||
-                           block.match(/>([A-Z0-9][^<]{10,80})</);
-        if (!titleMatch) continue;
-        const title = stripTags(titleMatch[1]).replace(/\s+/g, ' ').trim();
-        if (!isRelevant(title)) continue;
-
-        const priceMatch = block.match(/£\s*([\d,]+)/);
-        const yearMatch = title.match(/\b(20\d{2})\b/);
-        const hoursMatch = title.match(/([\d,]+)\s*(?:hours?|hrs?|h\b)/i) ||
-                           block.match(/Hours?:?\s*([\d,]+)/i);
-
-        listings.push({
-          id: nextId(),
-          title: title.slice(0, 80),
-          platform: 'bidspotter',
-          price: priceMatch ? parseInt(priceMatch[1].replace(/,/g, '')) : 0,
-          location: 'UK',
-          lat: 52.5 + (Math.random() - 0.5) * 4,
-          lng: -1.5 + (Math.random() - 0.5) * 4,
-          endsAt: new Date(Date.now() + (24 + Math.random() * 120) * 3600000),
-          relevanceScore: scoreRelevance(title),
-          condition: 'Good', conditionScore: 3,
-          year: yearMatch ? parseInt(yearMatch[1]) : 2018,
-          hours: hoursMatch ? parseInt(hoursMatch[1].replace(/,/g, '')) : null,
-          isNew: true, imageColor: '#E8500A',
-          listingUrl: 'https://www.bidspotter.co.uk' + path,
-          source: 'live',
-        });
-
-        if (listings.length >= 40) break;
+      while ((m = lotRe.exec(plainText)) !== null) {
+        procesMatch(m[1], m[2], url);
       }
-
-      // Also try plain text extraction from the search results page
-      // The search pages show lot descriptions directly in the HTML
-      const descRe = /(\d{4}\s+(?:JCB|CAT|Caterpillar|Komatsu|Kubota|Hitachi|Kobelco|Volvo|Case|Doosan|Terex|Bobcat|Liebherr|Takeuchi|Yanmar|Hyundai)[^<\n]{10,100})/g;
-      let dm;
-      while ((dm = descRe.exec(html)) !== null) {
-        const title = dm[1].trim().replace(/\s+/g, ' ');
-        if (listings.some(l => l.title.includes(title.slice(0, 20)))) continue;
-
-        const yearMatch = title.match(/\b(20\d{2})\b/);
-        const hoursMatch = title.match(/([\d,]+)\s*(?:hours?|hrs?|h\b)/i);
-
-        listings.push({
-          id: nextId(),
-          title: title.slice(0, 80),
-          platform: 'bidspotter',
-          price: 0,
-          location: 'UK',
-          lat: 52.5 + (Math.random() - 0.5) * 4,
-          lng: -1.5 + (Math.random() - 0.5) * 4,
-          endsAt: new Date(Date.now() + (24 + Math.random() * 120) * 3600000),
-          relevanceScore: scoreRelevance(title),
-          condition: 'Good', conditionScore: 3,
-          year: yearMatch ? parseInt(yearMatch[1]) : 2018,
-          hours: hoursMatch ? parseInt(hoursMatch[1].replace(/,/g, '')) : null,
-          isNew: true, imageColor: '#E8500A',
-          listingUrl: url,
-          source: 'live',
-        });
+      while ((m = compactRe.exec(plainText)) !== null) {
+        procesMatch(m[1], m[2], url);
       }
 
     } catch (err) {
