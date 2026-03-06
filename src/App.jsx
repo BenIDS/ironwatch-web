@@ -341,10 +341,10 @@ export default function App() {
   const filtered = listings
     .filter(l => filterPlatform === "all" || l.platform === filterPlatform)
     .filter(l => !filterEnding || isEndingSoon(l.endsAt))
-    .filter(l => l.price >= priceRange[0] && l.price <= priceRange[1])
-    .filter(l => l.hours >= hoursRange[0] && l.hours <= hoursRange[1])
-    .filter(l => l.year >= yearRange[0] && l.year <= yearRange[1])
-    .filter(l => l.conditionScore >= conditionRange[0] && l.conditionScore <= conditionRange[1])
+    .filter(l => (l.price || 0) >= priceRange[0] && (l.price || 0) <= priceRange[1])
+    .filter(l => (l.hours == null) || (l.hours >= hoursRange[0] && l.hours <= hoursRange[1]))
+    .filter(l => (l.year || 2018) >= yearRange[0] && (l.year || 2018) <= yearRange[1])
+    .filter(l => (l.conditionScore || 3) >= conditionRange[0] && (l.conditionScore || 3) <= conditionRange[1])
     .filter(l => {
       if (!locationSearch.trim()) return true;
       const coords = getCityCoords(locationSearch);
@@ -363,7 +363,7 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
         body: JSON.stringify({
-          messages: [{ role: "user", content: `You are an expert heavy plant and machinery valuator. Analyse this auction listing.\n\nListing: ${listing.title}\nPlatform: ${getPlatform(listing.platform).name}\nPrice: £${listing.price.toLocaleString()}\nYear: ${listing.year} | Hours: ${listing.hours.toLocaleString()} | Condition: ${listing.condition}\nLocation: ${listing.location} | Ends: ${formatTimeLeft(listing.endsAt)}\nRelevance: ${listing.relevanceScore}%\n\nProvide:\n1. **Market Value Assessment**\n2. **Key Risk Factors**\n3. **Recommendation** — BUY / INSPECT FIRST / PASS\n4. **Maximum Bid**\n5. **Urgency**\n\nBe direct. Under 300 words.` }]
+          messages: [{ role: "user", content: `You are an expert heavy plant and machinery valuator. Analyse this auction listing.\n\nListing: ${listing.title}\nPlatform: ${getPlatform(listing.platform).name}\nPrice: £${(listing.price||0).toLocaleString()}\nYear: ${listing.year} | Hours: ${listing.hours != null ? listing.hours.toLocaleString() : 'unknown'} | Condition: ${listing.condition}\nLocation: ${listing.location} | Ends: ${formatTimeLeft(listing.endsAt)}\nRelevance: ${listing.relevanceScore}%\n\nProvide:\n1. **Market Value Assessment**\n2. **Key Risk Factors**\n3. **Recommendation** — BUY / INSPECT FIRST / PASS\n4. **Maximum Bid**\n5. **Urgency**\n\nBe direct. Under 300 words.` }]
         })
       });
       const data = await res.json();
@@ -575,7 +575,7 @@ export default function App() {
                         <div style={{ display: "flex", gap: 5, marginBottom: 8, flexWrap: "wrap" }}>
                           <span style={{ background: "rgba(255,107,0,0.08)", color: plat.color, fontSize: 9, padding: "2px 7px", border: `1px solid ${plat.color}28` }}>{plat.name}</span>
                           <span style={{ background: "#1A2030", color: "#A0A8B8", fontSize: 9, padding: "2px 7px" }}>{listing.year}</span>
-                          <span style={{ background: "#1A2030", color: "#A0A8B8", fontSize: 9, padding: "2px 7px" }}>{listing.hours.toLocaleString()}h</span>
+                          <span style={{ background: "#1A2030", color: "#A0A8B8", fontSize: 9, padding: "2px 7px" }}>{listing.hours != null ? listing.hours.toLocaleString() + 'h' : 'hrs N/A'}</span>
                           <span style={{ background: "#1A2030", color: listing.conditionScore >= 4 ? "#00C896" : listing.conditionScore >= 3 ? "#FFB347" : "#FF6B00", fontSize: 9, padding: "2px 7px" }}>{listing.condition}</span>
                         </div>
                         <div style={{ fontSize: 10, color: "#5A6478", marginBottom: 10 }}>📍 {listing.location}</div>
@@ -629,7 +629,7 @@ export default function App() {
                 <div style={{ background: "#0D1017", border: "1px solid #1E2535", padding: 18 }}>
                   <div style={{ height: 4, background: `linear-gradient(90deg, ${selectedListing.imageColor}, ${getPlatform(selectedListing.platform).color})`, marginBottom: 14 }} />
                   <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 12, lineHeight: 1.4 }}>{selectedListing.title}</div>
-                  {[["Platform", getPlatform(selectedListing.platform).name], ["Guide Price", `£${selectedListing.price.toLocaleString()}`], ["Year", selectedListing.year], ["Hours", `${selectedListing.hours.toLocaleString()}h`], ["Condition", selectedListing.condition], ["Location", selectedListing.location], ["Ends in", formatTimeLeft(selectedListing.endsAt)], ["AI Score", `${selectedListing.relevanceScore}%`]].map(([k, v]) => (
+                  {[["Platform", getPlatform(selectedListing.platform).name], ["Guide Price", `£${(selectedListing.price||0).toLocaleString()}`], ["Year", selectedListing.year], ["Hours", selectedListing.hours != null ? `${selectedListing.hours.toLocaleString()}h` : 'N/A'], ["Condition", selectedListing.condition], ["Location", selectedListing.location], ["Ends in", formatTimeLeft(selectedListing.endsAt)], ["AI Score", `${selectedListing.relevanceScore}%`]].map(([k, v]) => (
                     <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid #1A2030", fontSize: 11 }}><span style={{ color: "#5A6478" }}>{k}</span><span style={{ color: "#E0E4EC" }}>{v}</span></div>
                   ))}
                   <a href={selectedListing.listingUrl} target="_blank" rel="noopener noreferrer" style={{ display: "block", marginTop: 12, background: "rgba(107,143,255,0.1)", border: "1px solid rgba(107,143,255,0.25)", color: "#6B8FFF", padding: "9px", fontSize: 10, textDecoration: "none", textAlign: "center", letterSpacing: "0.1em" }}>VIEW LIVE LISTING ↗</a>
