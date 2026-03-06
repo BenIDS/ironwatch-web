@@ -1,51 +1,25 @@
 const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
 
-// ─── SHARED HELPERS ────────────────────────────────────────────────────────────
-
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
 const HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
   'Accept-Language': 'en-GB,en;q=0.9',
   'Accept-Encoding': 'gzip, deflate, br',
   'Cache-Control': 'no-cache',
+  'Pragma': 'no-cache',
+  'Sec-Fetch-Dest': 'document',
+  'Sec-Fetch-Mode': 'navigate',
+  'Sec-Fetch-Site': 'none',
 };
 
-// Simple HTML text extractor — avoids needing cheerio
-function extractText(html, start, end) {
-  const si = html.indexOf(start);
-  if (si === -1) return '';
-  const ei = html.indexOf(end, si + start.length);
-  if (ei === -1) return '';
-  return html.slice(si + start.length, ei).replace(/<[^>]+>/g, '').trim();
-}
-
-function extractAll(html, pattern) {
-  const results = [];
-  const regex = new RegExp(pattern, 'gs');
-  let m;
-  while ((m = regex.exec(html)) !== null) results.push(m);
-  return results;
-}
-
 function stripTags(str) {
-  return str.replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
+  return (str || '').replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').trim();
 }
 
-function slugify(str) {
-  return str.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-}
+function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-let idCounter = Date.now();
-function nextId() { return ++idCounter; }
-
-// Keywords that match plant & machinery
-const PLANT_KEYWORDS = [
-  'excavator', 'digger', 'jcb', 'caterpillar', 'cat', 'komatsu', 'volvo', 'hitachi',
-  'doosan', 'case', 'liebherr', 'terex', 'bobcat', 'backhoe', 'bulldozer', 'dozer',
-  'loader', 'crane', 'dumper', 'telehandler', 'roller', 'compactor', 'paver',
-  'plant', 'machinery', 'forklift', 'grader', 'scraper', 'drill', 'piling',
-  'tracked', 'crawler', 'wheeled', 'skid steer', 'mini digger'
-];
+const PLANT_KEYWORDS = ['excavator','digger','jcb','caterpillar',' cat ','komatsu','volvo','hitachi','doosan','case','liebherr','terex','bobcat','backhoe','bulldozer','dozer','loader','crane','dumper','telehandler','roller','compactor','paver','forklift','grader','tracked','crawler','skid steer','mini digger','kubota','takeuchi','kobelco','hyundai'];
 
 function isRelevant(title) {
   if (!title) return false;
@@ -57,316 +31,424 @@ function scoreRelevance(title) {
   if (!title) return 50;
   const t = title.toLowerCase();
   let score = 50;
-  if (t.includes('excavator') || t.includes('digger')) score += 25;
-  if (t.includes('jcb') || t.includes('cat') || t.includes('komatsu') || t.includes('volvo')) score += 15;
-  if (t.includes('uk') || t.includes('england') || t.includes('britain')) score += 10;
-  if (t.match(/\d{4}/)) score += 5; // has year
-  if (t.match(/\d+h\b/)) score += 5; // has hours
+  if (t.includes('excavator') || t.includes('digger')) score += 20;
+  if (t.includes('jcb') || t.includes('cat') || t.includes('komatsu') || t.includes('volvo') || t.includes('kubota') || t.includes('hitachi')) score += 15;
+  if (t.match(/\b(20\d{2})\b/)) score += 5;
+  if (t.match(/\d+\s*h(ours?|rs?)?\b/i)) score += 5;
   return Math.min(score, 99);
 }
 
-// ─── MASCUS SCRAPER ────────────────────────────────────────────────────────────
-// Mascus serves real HTML — most reliable of the four
+let idCounter = Date.now();
+function nextId() { return ++idCounter; }
 
+// ─── MASCUS ────────────────────────────────────────────────────────────────────
+// Mascus UK serves real HTML with listings in a consistent format
+// URL pattern confirmed: /construction/excavators, /construction/backhoe-loaders etc
 async function scrapeMascus(keywords) {
   const listings = [];
-  const categories = [
+  const urls = [
     'https://www.mascus.co.uk/construction/excavators',
     'https://www.mascus.co.uk/construction/backhoe-loaders',
     'https://www.mascus.co.uk/construction/wheel-loaders',
     'https://www.mascus.co.uk/construction/crawler-dozers',
     'https://www.mascus.co.uk/construction/cranes',
+    'https://www.mascus.co.uk/construction/dumpers',
+    'https://www.mascus.co.uk/construction/telehandlers',
   ];
 
-  for (const url of categories) {
+  for (const url of urls) {
     try {
-      const res = await fetch(url, { headers: HEADERS, signal: AbortSignal.timeout(12000) });
-      if (!res.ok) continue;
+      const res = await fetch(url, {
+        headers: { ...HEADERS, 'Referer': 'https://www.mascus.co.uk/' },
+        signal: AbortSignal.timeout(15000)
+      });
+      if (!res.ok) { console.log(`Mascus ${url}: HTTP ${res.status}`); continue; }
       const html = await res.text();
 
-      // Extract listing blocks — Mascus wraps each in <div class="listing-item"> or similar
-      // Match listing rows by their link pattern
-      const linkMatches = extractAll(
-        html,
-        /href="(\/[a-z0-9\-]+\/[a-z0-9\-]+\/[a-z0-9\-]+-[a-z0-9]+\.html)"[^>]*>[\s\S]{0,400}?<\/a>/
-      );
+      // Mascus listing rows: each has class "listing-item" or similar
+      // The listing data appears as: Title • Year • Hours • Location • Seller
+      // Links follow pattern /[category]/[subcategory]/[id].html
 
-      for (const m of linkMatches.slice(0, 20)) {
-        const block = m[0];
-        const path = m[1];
-        if (!path || path.includes('search') || path.includes('category')) continue;
+      // Extract all internal listing links
+      const linkRe = /href="(\/construction\/[^"]+\/[a-z0-9\-]+-[a-z0-9]+\.html)"/g;
+      const titleRe = /class="[^"]*title[^"]*"[^>]*>\s*<a[^>]*>([^<]+)<\/a>/g;
 
-        const title = stripTags(block.match(/title="([^"]+)"/)?.[1] || block.match(/alt="([^"]+)"/)?.[1] || '');
-        if (!title || !isRelevant(title)) continue;
+      // Try to extract structured data from JSON-LD
+      const jsonLdMatch = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g);
+      if (jsonLdMatch) {
+        for (const block of jsonLdMatch) {
+          try {
+            const data = JSON.parse(block.replace(/<script[^>]*>/, '').replace('</script>', ''));
+            const items = Array.isArray(data) ? data : data['@graph'] || [data];
+            for (const item of items) {
+              if (item['@type'] === 'Product' || item['@type'] === 'Offer') {
+                const title = item.name || '';
+                if (!isRelevant(title)) continue;
+                const price = item.offers?.price || item.price || 0;
+                listings.push({
+                  id: nextId(),
+                  title: title.slice(0, 80),
+                  platform: 'mascus',
+                  price: parseInt(price) || 0,
+                  location: item.location || 'UK',
+                  lat: 52.5 + (Math.random() - 0.5) * 4,
+                  lng: -1.5 + (Math.random() - 0.5) * 4,
+                  endsAt: new Date(Date.now() + (48 + Math.random() * 240) * 3600000),
+                  relevanceScore: scoreRelevance(title),
+                  condition: 'Good', conditionScore: 3,
+                  year: parseInt(title.match(/\b(20\d{2})\b/)?.[1]) || 2018,
+                  hours: parseInt(title.match(/([\d,]+)\s*h/i)?.[1]?.replace(/,/g, '')) || null,
+                  isNew: true, imageColor: '#1A3A6B',
+                  listingUrl: item.url || url,
+                  source: 'live',
+                });
+              }
+            }
+          } catch {}
+        }
+      }
 
-        // Extract price
-        const priceMatch = block.match(/£\s*([\d,]+)/);
-        const price = priceMatch ? parseInt(priceMatch[1].replace(/,/g, '')) : 0;
+      // HTML fallback: parse listing rows directly
+      // Mascus rows look like: <li class="...listing-item...">...<a href="/construction/...">TITLE</a>...• YEAR • HOURS • LOCATION
+      const rowRe = /<li[^>]*class="[^"]*listing[^"]*"[\s\S]*?<\/li>/g;
+      let rowMatch;
+      while ((rowMatch = rowRe.exec(html)) !== null) {
+        const row = rowMatch[0];
+        const linkMatch = row.match(/href="(\/[^"]+\.html)"/);
+        const titleMatch = row.match(/<a[^>]+href="\/[^"]+\.html"[^>]*>([^<]{5,80})<\/a>/);
+        if (!titleMatch) continue;
+        const title = stripTags(titleMatch[1]);
+        if (!isRelevant(title)) continue;
 
-        // Extract year
-        const yearMatch = title.match(/\b(20\d{2}|19\d{2})\b/) || block.match(/\b(20\d{2}|19\d{2})\b/);
-        const year = yearMatch ? parseInt(yearMatch[1]) : null;
-
-        // Extract hours
-        const hoursMatch = block.match(/([\d,]+)\s*h\b/i);
-        const hours = hoursMatch ? parseInt(hoursMatch[1].replace(/,/g, '')) : null;
-
-        // Extract location
-        const locationMatch = block.match(/([A-Z][a-zA-Z\s]+,\s*UK)/);
-        const location = locationMatch ? locationMatch[1] : 'UK';
+        const priceMatch = row.match(/£\s*([\d\s,]+)/);
+        const yearMatch = row.match(/\b(20\d{2}|19\d{2})\b/);
+        const hoursMatch = row.match(/([\d,]+)\s*h\b/i);
+        const locationMatch = row.match(/([A-Z][a-zA-Z\s]+,\s*(?:UK|England|Scotland|Wales|Ireland))/);
 
         listings.push({
           id: nextId(),
-          title: title.replace(/\s+/g, ' ').slice(0, 80),
+          title: title.slice(0, 80),
           platform: 'mascus',
-          price,
-          location,
+          price: priceMatch ? parseInt(priceMatch[1].replace(/[\s,]/g, '')) : 0,
+          location: locationMatch ? locationMatch[1] : 'UK',
           lat: 52.5 + (Math.random() - 0.5) * 4,
           lng: -1.5 + (Math.random() - 0.5) * 4,
-          endsAt: new Date(Date.now() + (24 + Math.random() * 120) * 3600000),
+          endsAt: new Date(Date.now() + (48 + Math.random() * 240) * 3600000),
           relevanceScore: scoreRelevance(title),
-          condition: 'Good',
-          conditionScore: 3,
-          year: year || 2018,
-          hours: hours || Math.floor(Math.random() * 8000 + 500),
-          isNew: true,
-          imageColor: '#1A3A6B',
-          listingUrl: 'https://www.mascus.co.uk' + path,
+          condition: 'Good', conditionScore: 3,
+          year: yearMatch ? parseInt(yearMatch[1]) : 2018,
+          hours: hoursMatch ? parseInt(hoursMatch[1].replace(/,/g, '')) : null,
+          isNew: true, imageColor: '#1A3A6B',
+          listingUrl: linkMatch ? 'https://www.mascus.co.uk' + linkMatch[1] : url,
           source: 'live',
         });
       }
     } catch (err) {
-      console.error(`Mascus scrape error (${url}):`, err.message);
+      console.error(`Mascus error (${url}):`, err.message);
     }
-    await delay(1500);
+    await delay(1000);
   }
 
+  console.log(`Mascus: found ${listings.length} listings`);
   return listings;
 }
 
-// ─── BIDSPOTTER SCRAPER ────────────────────────────────────────────────────────
-// Bidspotter has a search API endpoint we can hit directly
-
+// ─── BIDSPOTTER ────────────────────────────────────────────────────────────────
+// Confirmed URLs from search: /en-gb/search-excavator, /en-gb/for-sale/plant-and-machinery
+// Lot data is in HTML with rich descriptions
 async function scrapeBidspotter(keywords) {
   const listings = [];
+  const urls = [
+    'https://www.bidspotter.co.uk/en-gb/search-excavator',
+    'https://www.bidspotter.co.uk/en-gb/search-mini-excavator',
+    'https://www.bidspotter.co.uk/en-gb/for-sale/plant-and-machinery',
+    'https://www.bidspotter.co.uk/en-gb/for-sale/plant-and-machinery/dumpers',
+    'https://www.bidspotter.co.uk/en-gb/for-sale/plant-and-machinery/telehandlers',
+  ];
 
-  const searchTerms = keywords.length > 0 ? keywords : ['excavator', 'plant machinery', 'loader', 'crane'];
-
-  for (const term of searchTerms.slice(0, 3)) {
+  for (const url of urls) {
     try {
-      const searchUrl = `https://www.bidspotter.co.uk/en-gb/for-sale?q=${encodeURIComponent(term)}&category=plant-and-machinery`;
-      const res = await fetch(searchUrl, { headers: HEADERS, signal: AbortSignal.timeout(12000) });
-      if (!res.ok) continue;
+      const res = await fetch(url, {
+        headers: { ...HEADERS, 'Referer': 'https://www.bidspotter.co.uk/' },
+        signal: AbortSignal.timeout(15000)
+      });
+      if (!res.ok) { console.log(`Bidspotter ${url}: HTTP ${res.status}`); continue; }
       const html = await res.text();
 
-      // Bidspotter listing cards have identifiable patterns
-      const cardMatches = extractAll(
-        html,
-        /<article[^>]*class="[^"]*lot[^"]*"[\s\S]*?<\/article>/
-      );
+      // Bidspotter lots: each lot has a title and a link to /en-gb/auction-catalogues/.../lot-id
+      // From search results we can see titles like "2019 Kobelco SK140SRLC-5...", "2017 CAT 303E CR..."
+      // Links follow: href="/en-gb/auction-catalogues/[auctioneer]/catalogue-id-[id]/lot-id-[n]"
 
-      for (const m of cardMatches.slice(0, 15)) {
+      const lotRe = /href="(\/en-gb\/auction-catalogues\/[^"]+\/lot-id-\d+)"[^>]*>[\s\S]{0,600}?(?=href="\/en-gb\/auction-catalogues|$)/g;
+      let m;
+      while ((m = lotRe.exec(html)) !== null) {
+        const path = m[1];
         const block = m[0];
 
-        const titleMatch = block.match(/<h[23][^>]*>([\s\S]*?)<\/h[23]>/);
-        const title = titleMatch ? stripTags(titleMatch[1]) : '';
-        if (!title || !isRelevant(title)) continue;
-
-        const linkMatch = block.match(/href="([^"]+\/lots\/[^"]+)"/);
-        const listingUrl = linkMatch ? 'https://www.bidspotter.co.uk' + linkMatch[1] : 'https://www.bidspotter.co.uk';
+        // Extract title — Bidspotter shows it in <h3> or as link text
+        const titleMatch = block.match(/<h[23][^>]*>([\s\S]{3,100}?)<\/h[23]>/) ||
+                           block.match(/title="([^"]{5,100})"/) ||
+                           block.match(/>([A-Z0-9][^<]{10,80})</);
+        if (!titleMatch) continue;
+        const title = stripTags(titleMatch[1]).replace(/\s+/g, ' ').trim();
+        if (!isRelevant(title)) continue;
 
         const priceMatch = block.match(/£\s*([\d,]+)/);
-        const price = priceMatch ? parseInt(priceMatch[1].replace(/,/g, '')) : 0;
-
-        const dateMatch = block.match(/(\d{1,2}\s+\w+\s+\d{4})/);
-        const endsAt = dateMatch ? new Date(dateMatch[1]) : new Date(Date.now() + 48 * 3600000);
+        const yearMatch = title.match(/\b(20\d{2})\b/);
+        const hoursMatch = title.match(/([\d,]+)\s*(?:hours?|hrs?|h\b)/i) ||
+                           block.match(/Hours?:?\s*([\d,]+)/i);
 
         listings.push({
           id: nextId(),
           title: title.slice(0, 80),
           platform: 'bidspotter',
-          price,
+          price: priceMatch ? parseInt(priceMatch[1].replace(/,/g, '')) : 0,
           location: 'UK',
           lat: 52.5 + (Math.random() - 0.5) * 4,
           lng: -1.5 + (Math.random() - 0.5) * 4,
-          endsAt: isNaN(endsAt) ? new Date(Date.now() + 48 * 3600000) : endsAt,
+          endsAt: new Date(Date.now() + (24 + Math.random() * 120) * 3600000),
           relevanceScore: scoreRelevance(title),
-          condition: 'Good',
-          conditionScore: 3,
-          year: parseInt(title.match(/\b(20\d{2})\b/)?.[1]) || 2018,
-          hours: null,
-          isNew: true,
-          imageColor: '#E8500A',
-          listingUrl,
+          condition: 'Good', conditionScore: 3,
+          year: yearMatch ? parseInt(yearMatch[1]) : 2018,
+          hours: hoursMatch ? parseInt(hoursMatch[1].replace(/,/g, '')) : null,
+          isNew: true, imageColor: '#E8500A',
+          listingUrl: 'https://www.bidspotter.co.uk' + path,
+          source: 'live',
+        });
+
+        if (listings.length >= 40) break;
+      }
+
+      // Also try plain text extraction from the search results page
+      // The search pages show lot descriptions directly in the HTML
+      const descRe = /(\d{4}\s+(?:JCB|CAT|Caterpillar|Komatsu|Kubota|Hitachi|Kobelco|Volvo|Case|Doosan|Terex|Bobcat|Liebherr|Takeuchi|Yanmar|Hyundai)[^<\n]{10,100})/g;
+      let dm;
+      while ((dm = descRe.exec(html)) !== null) {
+        const title = dm[1].trim().replace(/\s+/g, ' ');
+        if (listings.some(l => l.title.includes(title.slice(0, 20)))) continue;
+
+        const yearMatch = title.match(/\b(20\d{2})\b/);
+        const hoursMatch = title.match(/([\d,]+)\s*(?:hours?|hrs?|h\b)/i);
+
+        listings.push({
+          id: nextId(),
+          title: title.slice(0, 80),
+          platform: 'bidspotter',
+          price: 0,
+          location: 'UK',
+          lat: 52.5 + (Math.random() - 0.5) * 4,
+          lng: -1.5 + (Math.random() - 0.5) * 4,
+          endsAt: new Date(Date.now() + (24 + Math.random() * 120) * 3600000),
+          relevanceScore: scoreRelevance(title),
+          condition: 'Good', conditionScore: 3,
+          year: yearMatch ? parseInt(yearMatch[1]) : 2018,
+          hours: hoursMatch ? parseInt(hoursMatch[1].replace(/,/g, '')) : null,
+          isNew: true, imageColor: '#E8500A',
+          listingUrl: url,
           source: 'live',
         });
       }
+
     } catch (err) {
-      console.error(`Bidspotter scrape error:`, err.message);
+      console.error(`Bidspotter error (${url}):`, err.message);
     }
-    await delay(2000);
+    await delay(1500);
   }
 
+  console.log(`Bidspotter: found ${listings.length} listings`);
   return listings;
 }
 
-// ─── EURO AUCTIONS SCRAPER ────────────────────────────────────────────────────
-// Euro Auctions has a simpler site structure
-
+// ─── EURO AUCTIONS ─────────────────────────────────────────────────────────────
+// Correct domain is euroauctions.com — their lot search uses /lots/ path
 async function scrapeEuroAuctions(keywords) {
   const listings = [];
+  const urls = [
+    'https://www.euroauctions.com/lots/?category=excavators',
+    'https://www.euroauctions.com/lots/?category=plant-machinery',
+    'https://www.euroauctions.com/lots/?q=excavator',
+    'https://www.euroauctions.com/lots/?q=jcb',
+  ];
 
-  try {
-    const url = 'https://www.euroauctions.com/lots/?q=excavator+loader+plant&country=GB';
-    const res = await fetch(url, { headers: HEADERS, signal: AbortSignal.timeout(12000) });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const html = await res.text();
-
-    const cardMatches = extractAll(
-      html,
-      /<div[^>]*class="[^"]*lot[^"]*"[\s\S]*?(?=<div[^>]*class="[^"]*lot[^"]*"|$)/
-    );
-
-    for (const m of cardMatches.slice(0, 20)) {
-      const block = m[0];
-      const titleMatch = block.match(/<h[1-4][^>]*>([\s\S]*?)<\/h[1-4]>/);
-      const title = titleMatch ? stripTags(titleMatch[1]) : '';
-      if (!title || !isRelevant(title)) continue;
-
-      const linkMatch = block.match(/href="([^"]+)"/);
-      const priceMatch = block.match(/£\s*([\d,]+)/);
-
-      listings.push({
-        id: nextId(),
-        title: title.slice(0, 80),
-        platform: 'euroauctions',
-        price: priceMatch ? parseInt(priceMatch[1].replace(/,/g, '')) : 0,
-        location: 'UK',
-        lat: 52.5 + (Math.random() - 0.5) * 4,
-        lng: -1.5 + (Math.random() - 0.5) * 4,
-        endsAt: new Date(Date.now() + (24 + Math.random() * 96) * 3600000),
-        relevanceScore: scoreRelevance(title),
-        condition: 'Good',
-        conditionScore: 3,
-        year: parseInt(title.match(/\b(20\d{2})\b/)?.[1]) || 2018,
-        hours: null,
-        isNew: true,
-        imageColor: '#0057B8',
-        listingUrl: linkMatch ? (linkMatch[1].startsWith('http') ? linkMatch[1] : 'https://www.euroauctions.com' + linkMatch[1]) : 'https://www.euroauctions.com',
-        source: 'live',
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, {
+        headers: { ...HEADERS, 'Referer': 'https://www.euroauctions.com/' },
+        signal: AbortSignal.timeout(15000)
       });
+      if (!res.ok) { console.log(`Euro Auctions ${url}: HTTP ${res.status}`); continue; }
+      const html = await res.text();
+
+      // Try JSON-LD first
+      const jsonMatches = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g) || [];
+      for (const block of jsonMatches) {
+        try {
+          const json = JSON.parse(block.replace(/<script[^>]*>/, '').replace('</script>', '').trim());
+          const items = json['@graph'] || (Array.isArray(json) ? json : [json]);
+          for (const item of items) {
+            if (!item.name) continue;
+            const title = item.name;
+            if (!isRelevant(title)) continue;
+            listings.push({
+              id: nextId(),
+              title: title.slice(0, 80),
+              platform: 'euroauctions',
+              price: parseInt(item.offers?.price || item.price || 0) || 0,
+              location: item.location || 'UK',
+              lat: 52.5 + (Math.random() - 0.5) * 4,
+              lng: -1.5 + (Math.random() - 0.5) * 4,
+              endsAt: item.endDate ? new Date(item.endDate) : new Date(Date.now() + (48 + Math.random() * 96) * 3600000),
+              relevanceScore: scoreRelevance(title),
+              condition: 'Good', conditionScore: 3,
+              year: parseInt(title.match(/\b(20\d{2})\b/)?.[1]) || 2018,
+              hours: null, isNew: true, imageColor: '#0057B8',
+              listingUrl: item.url || 'https://www.euroauctions.com',
+              source: 'live',
+            });
+          }
+        } catch {}
+      }
+
+      // HTML fallback — extract lot cards
+      const cardRe = /<(?:div|article)[^>]*class="[^"]*(?:lot|item|card)[^"]*"[\s\S]*?<\/(?:div|article)>/g;
+      let cm;
+      while ((cm = cardRe.exec(html)) !== null) {
+        const block = cm[0];
+        const titleMatch = block.match(/<h[1-4][^>]*>([\s\S]{5,100}?)<\/h[1-4]>/);
+        if (!titleMatch) continue;
+        const title = stripTags(titleMatch[1]);
+        if (!isRelevant(title)) continue;
+
+        const linkMatch = block.match(/href="([^"]+)"/);
+        const priceMatch = block.match(/£\s*([\d,]+)/);
+        listings.push({
+          id: nextId(),
+          title: title.slice(0, 80),
+          platform: 'euroauctions',
+          price: priceMatch ? parseInt(priceMatch[1].replace(/,/g, '')) : 0,
+          location: 'UK',
+          lat: 52.5 + (Math.random() - 0.5) * 4,
+          lng: -1.5 + (Math.random() - 0.5) * 4,
+          endsAt: new Date(Date.now() + (48 + Math.random() * 96) * 3600000),
+          relevanceScore: scoreRelevance(title),
+          condition: 'Good', conditionScore: 3,
+          year: parseInt(title.match(/\b(20\d{2})\b/)?.[1]) || 2018,
+          hours: null, isNew: true, imageColor: '#0057B8',
+          listingUrl: linkMatch ? (linkMatch[1].startsWith('http') ? linkMatch[1] : 'https://www.euroauctions.com' + linkMatch[1]) : 'https://www.euroauctions.com',
+          source: 'live',
+        });
+      }
+
+    } catch (err) {
+      console.error(`Euro Auctions error (${url}):`, err.message);
     }
-  } catch (err) {
-    console.error('Euro Auctions scrape error:', err.message);
+    await delay(1500);
   }
 
+  console.log(`Euro Auctions: found ${listings.length} listings`);
   return listings;
 }
 
-// ─── RITCHIE BROS SCRAPER ──────────────────────────────────────────────────────
-// Ritchie Bros has a public search page we can parse
-
+// ─── RITCHIE BROS ──────────────────────────────────────────────────────────────
+// rbauction.com — try their search with UK filter
 async function scrapeRitchieBros(keywords) {
   const listings = [];
 
-  const searchTerms = keywords.length > 0 ? keywords.slice(0, 2) : ['excavator', 'wheel loader'];
+  // Try their IronPlanet UK search which is more accessible
+  const urls = [
+    'https://www.ironplanet.com/uk',
+    'https://www.rbauction.com/heavy-equipment?q=excavator&loc=GBR',
+  ];
 
-  for (const term of searchTerms) {
+  for (const url of urls) {
     try {
-      const url = `https://www.rbauction.com/heavy-equipment?q=${encodeURIComponent(term)}&loc=GBR`;
-      const res = await fetch(url, { headers: HEADERS, signal: AbortSignal.timeout(12000) });
-      if (!res.ok) continue;
+      const res = await fetch(url, {
+        headers: {
+          ...HEADERS,
+          'Referer': 'https://www.google.com/',
+          'sec-ch-ua': '"Chromium";v="122"',
+          'sec-ch-ua-mobile': '?0',
+          'sec-ch-ua-platform': '"Windows"',
+        },
+        signal: AbortSignal.timeout(15000)
+      });
+      if (!res.ok) { console.log(`Ritchie/IronPlanet ${url}: HTTP ${res.status}`); continue; }
       const html = await res.text();
 
-      // Look for JSON-LD or embedded data objects in the page
-      const jsonMatch = html.match(/window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\});\s*<\/script>/);
-      if (jsonMatch) {
+      // Try __NEXT_DATA__ or __INITIAL_STATE__ embedded JSON
+      const nextData = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+      if (nextData) {
         try {
-          const data = JSON.parse(jsonMatch[1]);
-          const items = data?.search?.results?.items || data?.items || [];
-          for (const item of items.slice(0, 15)) {
+          const data = JSON.parse(nextData[1]);
+          const items = data?.props?.pageProps?.items ||
+                        data?.props?.pageProps?.results ||
+                        data?.props?.pageProps?.listings || [];
+          for (const item of items.slice(0, 20)) {
             const title = item.title || item.name || item.description || '';
             if (!isRelevant(title)) continue;
             listings.push({
               id: nextId(),
               title: title.slice(0, 80),
               platform: 'ritchie',
-              price: item.price || item.currentBid || 0,
+              price: Math.round((item.price || item.currentBid || 0) * 0.79),
               location: item.location || item.city || 'UK',
               lat: 52.5 + (Math.random() - 0.5) * 4,
               lng: -1.5 + (Math.random() - 0.5) * 4,
               endsAt: item.auctionDate ? new Date(item.auctionDate) : new Date(Date.now() + 72 * 3600000),
               relevanceScore: scoreRelevance(title),
-              condition: 'Good',
-              conditionScore: 3,
+              condition: 'Good', conditionScore: 3,
               year: item.year || parseInt(title.match(/\b(20\d{2})\b/)?.[1]) || 2018,
               hours: item.hours || null,
-              isNew: true,
-              imageColor: '#00843D',
+              isNew: true, imageColor: '#00843D',
               listingUrl: item.url ? 'https://www.rbauction.com' + item.url : 'https://www.rbauction.com',
               source: 'live',
             });
           }
-          continue;
-        } catch (e) { /* fall through to HTML parse */ }
+        } catch {}
       }
 
-      // HTML fallback — parse listing cards
-      const cardMatches = extractAll(
-        html,
-        /<div[^>]*data-testid="[^"]*item[^"]*"[\s\S]*?(?=<div[^>]*data-testid="[^"]*item[^"]*"|$)/
-      );
-
-      for (const m of cardMatches.slice(0, 15)) {
-        const block = m[0];
-        const titleMatch = block.match(/<h[2-4][^>]*>([\s\S]*?)<\/h[2-4]>/);
-        const title = titleMatch ? stripTags(titleMatch[1]) : '';
-        if (!title || !isRelevant(title)) continue;
-
-        const priceMatch = block.match(/\$\s*([\d,]+)/);
-        const linkMatch = block.match(/href="([^"]+)"/);
-
+      // HTML fallback
+      const titleRe = /(\d{4}\s+(?:Cat|Caterpillar|Komatsu|Volvo|Hitachi|Case|JCB|Doosan|Liebherr|John Deere|Bobcat)[^\n<]{10,80})/g;
+      let tm;
+      while ((tm = titleRe.exec(html)) !== null) {
+        const title = tm[1].trim().replace(/\s+/g, ' ');
+        if (listings.some(l => l.title.includes(title.slice(0, 15)))) continue;
         listings.push({
           id: nextId(),
           title: title.slice(0, 80),
           platform: 'ritchie',
-          price: priceMatch ? Math.round(parseInt(priceMatch[1].replace(/,/g, '')) * 0.79) : 0, // USD→GBP approx
+          price: 0,
           location: 'UK',
           lat: 52.5 + (Math.random() - 0.5) * 4,
           lng: -1.5 + (Math.random() - 0.5) * 4,
-          endsAt: new Date(Date.now() + (24 + Math.random() * 96) * 3600000),
+          endsAt: new Date(Date.now() + (48 + Math.random() * 96) * 3600000),
           relevanceScore: scoreRelevance(title),
-          condition: 'Good',
-          conditionScore: 3,
+          condition: 'Good', conditionScore: 3,
           year: parseInt(title.match(/\b(20\d{2})\b/)?.[1]) || 2018,
-          hours: null,
-          isNew: true,
-          imageColor: '#00843D',
-          listingUrl: linkMatch ? 'https://www.rbauction.com' + linkMatch[1] : 'https://www.rbauction.com',
+          hours: null, isNew: true, imageColor: '#00843D',
+          listingUrl: url,
           source: 'live',
         });
       }
+
     } catch (err) {
-      console.error(`Ritchie Bros scrape error:`, err.message);
+      console.error(`Ritchie Bros error (${url}):`, err.message);
     }
     await delay(2000);
   }
 
+  console.log(`Ritchie Bros: found ${listings.length} listings`);
   return listings;
 }
-
-// ─── DELAY HELPER ─────────────────────────────────────────────────────────────
-function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ─── CACHE ─────────────────────────────────────────────────────────────────────
 let cachedListings = [];
 let lastScrapeTime = 0;
 const CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours
 
-// ─── MAIN EXPORT ──────────────────────────────────────────────────────────────
+// ─── MAIN ─────────────────────────────────────────────────────────────────────
 async function scrapeAll(keywords = [], forceRefresh = false) {
   const now = Date.now();
-
   if (!forceRefresh && cachedListings.length > 0 && (now - lastScrapeTime) < CACHE_TTL) {
     console.log(`Returning ${cachedListings.length} cached listings`);
     return { listings: cachedListings, fromCache: true, lastUpdated: new Date(lastScrapeTime) };
@@ -383,18 +465,17 @@ async function scrapeAll(keywords = [], forceRefresh = false) {
   const allListings = results
     .filter(r => r.status === 'fulfilled')
     .flatMap(r => r.value)
-    .filter(l => l.title && l.title.length > 3);
+    .filter(l => l.title && l.title.length > 5);
 
-  // Deduplicate by title similarity
+  // Deduplicate
   const seen = new Set();
   const deduped = allListings.filter(l => {
-    const key = l.title.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 30);
+    const key = l.title.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 25);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
 
-  // Sort by relevance
   deduped.sort((a, b) => b.relevanceScore - a.relevanceScore);
 
   const perPlatform = {
