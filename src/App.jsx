@@ -44,21 +44,43 @@ function RangeSlider({ label, min, max, value, onChange, format, color = "#FF6B0
   const [low, high] = value;
   const trackRef = useRef(null);
   function getPct(v) { return ((v - min) / (max - min)) * 100; }
-  function handleMouseDown(which) {
+
+  function getValFromClientX(clientX) {
+    const rect = trackRef.current.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    return Math.round(min + pct * (max - min));
+  }
+
+  function handleDragStart(which) {
     return (e) => {
       e.preventDefault();
+      const isTouch = e.type === "touchstart";
+
       const move = (ev) => {
-        const rect = trackRef.current.getBoundingClientRect();
-        const pct = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
-        const val = Math.round(min + pct * (max - min));
+        const clientX = isTouch ? ev.touches[0].clientX : ev.clientX;
+        const val = getValFromClientX(clientX);
         if (which === "low") onChange([Math.min(val, high - 1), high]);
         else onChange([low, Math.max(val, low + 1)]);
       };
-      const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
-      window.addEventListener("mousemove", move);
-      window.addEventListener("mouseup", up);
+      const up = () => {
+        if (isTouch) {
+          window.removeEventListener("touchmove", move);
+          window.removeEventListener("touchend", up);
+        } else {
+          window.removeEventListener("mousemove", move);
+          window.removeEventListener("mouseup", up);
+        }
+      };
+      if (isTouch) {
+        window.addEventListener("touchmove", move, { passive: false });
+        window.addEventListener("touchend", up);
+      } else {
+        window.addEventListener("mousemove", move);
+        window.addEventListener("mouseup", up);
+      }
     };
   }
+
   return (
     <div style={{ marginBottom: 20 }}>
       {label && <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
@@ -68,7 +90,10 @@ function RangeSlider({ label, min, max, value, onChange, format, color = "#FF6B0
       <div ref={trackRef} style={{ position: "relative", height: 4, background: "#1E2535", borderRadius: 2, margin: "12px 8px", cursor: "pointer" }}>
         <div style={{ position: "absolute", height: "100%", borderRadius: 2, background: color, opacity: 0.8, left: `${getPct(low)}%`, width: `${getPct(high) - getPct(low)}%` }} />
         {[["low", low], ["high", high]].map(([which, val]) => (
-          <div key={which} onMouseDown={handleMouseDown(which)} style={{ position: "absolute", top: "50%", left: `${getPct(val)}%`, transform: "translate(-50%, -50%)", width: 16, height: 16, borderRadius: "50%", background: color, border: "2px solid #0A0C10", cursor: "grab", zIndex: 2, boxShadow: `0 0 6px ${color}66` }} />
+          <div key={which}
+            onMouseDown={handleDragStart(which)}
+            onTouchStart={handleDragStart(which)}
+            style={{ position: "absolute", top: "50%", left: `${getPct(val)}%`, transform: "translate(-50%, -50%)", width: 24, height: 24, borderRadius: "50%", background: color, border: "2px solid #0A0C10", cursor: "grab", zIndex: 2, boxShadow: `0 0 6px ${color}66`, touchAction: "none" }} />
         ))}
       </div>
     </div>
@@ -368,7 +393,7 @@ export default function App() {
       </div>
 
       {/* Tabs */}
-      <div className="iw-tabs" style={{ background: "#0D1017", borderBottom: "1px solid #1E2535", display: "flex", padding: "0 24px", overflowX: "auto", flexShrink: 0 }}>
+      <div className="iw-tabs" style={{ background: "#0D1017", borderBottom: "1px solid #1E2535", display: "flex", padding: "0 24px", flexShrink: 0 }}>
         {tabs.map(t => (
           <button key={t.id} className="tab-btn" onClick={() => setActiveTab(t.id)} style={{ background: activeTab === t.id ? "rgba(255,107,0,0.1)" : "transparent", color: activeTab === t.id ? "#FF6B00" : "#8A9AB8", borderBottom: `2px solid ${activeTab === t.id ? "#FF6B00" : "transparent"}`, padding: "11px 18px", fontSize: 10, letterSpacing: "0.12em", marginBottom: -1, whiteSpace: "nowrap", border: "none", cursor: "pointer" }}>
             {t.icon} {t.label.toUpperCase()}
