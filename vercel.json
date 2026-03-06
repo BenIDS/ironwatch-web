@@ -1,6 +1,6 @@
 {
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "REPLACE_WITH_YOUR_RENDER_URL/api/$1" },
+    { "source": "/api/(.*)", "destination": "https://ironwatch-web.onrender.com/api/$1" },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }
