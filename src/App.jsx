@@ -619,16 +619,6 @@ export default function App() {
           </div>
         )}
       </div>
-
-      {/* Bottom nav — mobile only, fixed to bottom */}
-      <div className="iw-bottom-nav">
-        {[{ id: "dashboard", icon: "◈", label: "HOME" }, { id: "listings", icon: "⊞", label: "LISTINGS" }, { id: "photo", icon: "📷", label: "PHOTO" }, { id: "analyse", icon: "◎", label: "AI" }, { id: "settings", icon: "⚙", label: "SETTINGS" }].map(t => (
-          <button key={t.id} className={activeTab === t.id ? "active" : ""} onClick={() => { setActiveTab(t.id); setFilterOpen(false); }}>
-            <span className="nav-icon">{t.icon}</span>
-            {t.label}
-          </button>
-        ))}
-      </div>
     </div>
   );
 }
