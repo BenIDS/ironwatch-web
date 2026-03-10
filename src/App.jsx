@@ -14,18 +14,7 @@ const PLATFORMS = [
   { id: "proxibid", name: "Proxibid", color: "#1A3A6B", url: "https://www.proxibid.com" },
 ];
 
-const MOCK_LISTINGS = [
-  { id: 1, title: "2018 Caterpillar 320 Excavator", platform: "ritchie", price: 85000, location: "Birmingham, UK", lat: 52.48, lng: -1.89, endsAt: new Date(Date.now() + 3 * 3600000), relevanceScore: 97, condition: "Good", conditionScore: 3, year: 2018, hours: 4200, isNew: true, imageColor: "#2D4A1E", listingUrl: "https://www.rbauction.com" },
-  { id: 2, title: "Komatsu PC210 LC Excavator 2019", platform: "euroauctions", price: 72000, location: "Leeds, UK", lat: 53.80, lng: -1.55, endsAt: new Date(Date.now() + 26 * 3600000), relevanceScore: 94, condition: "Very Good", conditionScore: 4, year: 2019, hours: 3800, isNew: true, imageColor: "#1A3A6B", listingUrl: "https://www.euroauctions.com" },
-  { id: 3, title: "JCB 3CX Backhoe Loader 2020", platform: "bidspotter", price: 38500, location: "Manchester, UK", lat: 53.48, lng: -2.24, endsAt: new Date(Date.now() + 6 * 3600000), relevanceScore: 91, condition: "Excellent", conditionScore: 5, year: 2020, hours: 1950, isNew: true, imageColor: "#8B4513", listingUrl: "https://www.bidspotter.co.uk" },
-  { id: 4, title: "Volvo L90H Wheel Loader", platform: "mascus", price: 65000, location: "Glasgow, UK", lat: 55.86, lng: -4.25, endsAt: new Date(Date.now() + 48 * 3600000), relevanceScore: 88, condition: "Good", conditionScore: 3, year: 2017, hours: 6100, isNew: false, imageColor: "#4A0E0E", listingUrl: "https://www.mascus.co.uk" },
-  { id: 5, title: "Hitachi ZX300 Excavator - Low Hours", platform: "ebay", price: 91000, location: "Bristol, UK", lat: 51.45, lng: -2.59, endsAt: new Date(Date.now() + 2 * 3600000), relevanceScore: 96, condition: "Very Good", conditionScore: 4, year: 2021, hours: 2100, isNew: false, imageColor: "#1E3A2D", listingUrl: "https://www.ebay.co.uk" },
-  { id: 6, title: "Liebherr LTM 1070 Mobile Crane", platform: "ibidder", price: 145000, location: "Sheffield, UK", lat: 53.38, lng: -1.47, endsAt: new Date(Date.now() + 72 * 3600000), relevanceScore: 82, condition: "Good", conditionScore: 3, year: 2016, hours: 8200, isNew: true, imageColor: "#2D1A4A", listingUrl: "https://www.i-bidder.com" },
-  { id: 7, title: "Bobcat S450 Skid Steer Loader 2022", platform: "ritchie", price: 28000, location: "Cardiff, UK", lat: 51.48, lng: -3.18, endsAt: new Date(Date.now() + 5 * 3600000), relevanceScore: 85, condition: "Excellent", conditionScore: 5, year: 2022, hours: 890, isNew: true, imageColor: "#4A3300", listingUrl: "https://www.rbauction.com" },
-  { id: 8, title: "Doosan DX300LC-5 Excavator", platform: "euroauctions", price: 78500, location: "Nottingham, UK", lat: 52.95, lng: -1.15, endsAt: new Date(Date.now() + 31 * 3600000), relevanceScore: 90, condition: "Good", conditionScore: 3, year: 2019, hours: 4900, isNew: false, imageColor: "#003366", listingUrl: "https://www.euroauctions.com" },
-  { id: 9, title: "Terex TC125 Tracked Excavator", platform: "proxibid", price: 42000, location: "Edinburgh, UK", lat: 55.95, lng: -3.19, endsAt: new Date(Date.now() + 14 * 3600000), relevanceScore: 87, condition: "Fair", conditionScore: 2, year: 2015, hours: 9400, isNew: true, imageColor: "#2A2A4A", listingUrl: "https://www.proxibid.com" },
-  { id: 10, title: "Case CX210D Crawler Excavator 2020", platform: "bidspotter", price: 68000, location: "Liverpool, UK", lat: 53.41, lng: -2.98, endsAt: new Date(Date.now() + 55 * 3600000), relevanceScore: 93, condition: "Very Good", conditionScore: 4, year: 2020, hours: 3200, isNew: false, imageColor: "#1A1A3A", listingUrl: "https://www.bidspotter.co.uk" },
-];
+
 
 const CONDITION_LABELS = ["", "Poor", "Fair", "Good", "Very Good", "Excellent"];
 const UK_CITIES = ["London", "Birmingham", "Manchester", "Leeds", "Sheffield", "Bristol", "Glasgow", "Edinburgh", "Cardiff", "Liverpool", "Nottingham", "Newcastle"];
@@ -276,7 +265,7 @@ export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem("ironwatch_token"));
   const [activeTab, setActiveTab] = useState("dashboard");
   const [filterOpen, setFilterOpen] = useState(false);
-  const [listings, setListings] = useState(MOCK_LISTINGS);
+  const [listings, setListings] = useState([]);
   const [listingsLoading, setListingsLoading] = useState(false);
   const [listingsSource, setListingsSource] = useState("mock");
   const [lastUpdated, setLastUpdated] = useState(null);
@@ -436,7 +425,7 @@ export default function App() {
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
           {endingSoon.length > 0 && <div className="iw-header-ending" style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(220,60,30,0.12)", border: "1px solid rgba(220,60,30,0.35)", padding: "5px 12px", fontSize: 10, color: "#FF4444" }}><span className="pulse">●</span> {endingSoon.length} ENDING</div>}
           <div className="iw-header-count" style={{ fontSize: 10, color: "#3A4458" }}>
-            {listingsLoading ? <span style={{ color: "#FF6B00" }}>● LOADING...</span> : <span>{filtered.length}/{listings.length} {listingsSource === 'live' ? <span style={{ color: "#00C896" }}>● LIVE</span> : listingsSource === 'cache' ? '(cached)' : '(demo)'}</span>}
+            {listingsLoading ? <span style={{ color: "#FF6B00" }}>● LOADING...</span> : listings.length === 0 ? <span style={{ color: "#5A6478" }}>No listings — click refresh</span> : <span>{filtered.length}/{listings.length} {listingsSource === 'live' ? <span style={{ color: "#00C896" }}>● LIVE</span> : '(cached)'}</span>}
           </div>
           <button className="abtn iw-header-scan" onClick={runScan} disabled={scanning} style={{ background: scanning ? "#1E2535" : "#FF6B00", color: scanning ? "#5A6478" : "#000", padding: "7px 16px", fontSize: 10, fontFamily: "'DM Mono',monospace", fontWeight: 500, letterSpacing: "0.1em", border: "none" }}>
             {scanning ? "SCANNING..." : "▶ RUN SCAN"}
@@ -464,7 +453,7 @@ export default function App() {
         {activeTab === "dashboard" && (
           <div>
             <div className="iw-kpi-grid" style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14, marginBottom: 22 }}>
-              {[{ label: "ACTIVE LISTINGS", value: listings.length, sub: `${newToday.length} new today`, accent: "#FF6B00" }, { label: "FILTERED RESULTS", value: filtered.length, sub: "matching criteria", accent: "#6B8FFF" }, { label: "ENDING < 24H", value: endingSoon.length, sub: "Require attention", accent: "#FF4444" }, { label: "AVG RELEVANCE", value: `${Math.round(listings.reduce((a, b) => a + b.relevanceScore, 0) / listings.length)}%`, sub: "AI scored", accent: "#00C896" }].map(k => (
+              {[{ label: "ACTIVE LISTINGS", value: listings.length, sub: `${newToday.length} new today`, accent: "#FF6B00" }, { label: "FILTERED RESULTS", value: filtered.length, sub: "matching criteria", accent: "#6B8FFF" }, { label: "ENDING < 24H", value: endingSoon.length, sub: "Require attention", accent: "#FF4444" }, { label: "AVG RELEVANCE", value: listings.length ? `${Math.round(listings.reduce((a, b) => a + b.relevanceScore, 0) / listings.length)}%` : 'N/A', sub: "AI scored", accent: "#00C896" }].map(k => (
                 <div key={k.label} style={{ background: "#0D1017", border: "1px solid #1E2535", padding: "16px 18px" }}>
                   <div style={{ fontSize: 9, color: "#5A6478", letterSpacing: "0.15em", marginBottom: 6 }}>{k.label}</div>
                   <div className="iw-kpi-value" style={{ fontFamily: "'Bebas Neue',sans-serif", fontSize: 34, color: k.accent, lineHeight: 1 }}>{k.value}</div>
