@@ -186,28 +186,32 @@ function parseMsDate(val) {
 }
 
 async function bsFetchCatalogueUrls() {
-  // Discover active UK plant & machinery catalogues from search page
-  const searchUrl = `${BS_BASE}/en-gb/for-sale/plant-and-machinery`;
-  try {
-    const res = await fetch(searchUrl, {
-      headers: { ...BS_HEADERS, 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
-      signal: AbortSignal.timeout(20000),
-    });
-    if (!res.ok) { console.log(`Bidspotter catalogue discovery: HTTP ${res.status}`); return []; }
-    const html = await res.text();
-
-    // Catalogue URLs appear as href="/en-gb/auction-catalogues/[auctioneer]/catalogue-id-[id]"
-    const re = /href="(\/en-gb\/auction-catalogues\/[^/]+\/catalogue-id-[^"]+)"/g;
-    const found = new Set();
-    let m;
-    while ((m = re.exec(html)) !== null) found.add(m[1]);
-    const urls = [...found].map(p => `${BS_BASE}${p}`);
-    console.log(`Bidspotter: discovered ${urls.length} catalogues from search page`);
-    return urls;
-  } catch (err) {
-    console.error('Bidspotter catalogue discovery error:', err.message);
-    return [];
+  const discoveryPages = [
+    `${BS_BASE}/en-gb/for-sale/plant-and-machinery`,
+    `${BS_BASE}/en-gb/auction-catalogues`,
+    `${BS_BASE}/en-gb`,
+  ];
+  const found = new Set();
+  for (const searchUrl of discoveryPages) {
+    try {
+      const res = await fetch(searchUrl, {
+        headers: { ...BS_HEADERS, 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
+        signal: AbortSignal.timeout(20000),
+      });
+      if (!res.ok) continue;
+      const html = await res.text();
+      const re = /href="(\/en-gb\/auction-catalogues\/[^\/"]+\/catalogue-id-[^"#?]+)"/g;
+      let m;
+      while ((m = re.exec(html)) !== null) found.add(m[1]);
+      if (found.size > 0) break;
+    } catch (err) {
+      console.error('Bidspotter catalogue discovery error:', err.message);
+    }
+    await delay(500);
   }
+  const urls = [...found].map(p => `${BS_BASE}${p}`);
+  console.log(`Bidspotter: discovered ${urls.length} catalogues`);
+  return urls;
 }
 
 async function bsFetchLotsFromCatalogue(catalogueUrl) {
@@ -356,13 +360,16 @@ async function bsFetchPricesViaSimilarLots(catalogueUrl, lotId) {
     if (text.trimStart().startsWith('<')) return priceMap;
     const data = JSON.parse(text);
     const items = data?.items || data?.results || (Array.isArray(data) ? data : []);
+    if (items.length > 0) console.log('Bidspotter similar-lots sample fields:', Object.keys(items[0]).join(', '));
     for (const item of items) {
       const id = (item.lotId || item.id || '').toLowerCase();
       if (id) priceMap[id] = {
-        price: item.hammerPrice || item.currentBid || item.startPrice || 0,
+        // hammerPrice = current leading bid on live lots; lowEstimate as fallback
+        price: item.hammerPrice || item.currentBid || item.lowEstimate || item.startPrice || 0,
         endTime: item.endTimeUtc || item.endDate || null,
-        title: item.title || item.description || '',
-        lotUrl: item.url || null,
+        title: item.title || item.description || item.name || '',
+        lotUrl: item.url || item.lotUrl || null,
+        clientName: item.clientName || null,
       };
     }
     console.log(`Bidspotter similar-lots: got prices for ${Object.keys(priceMap).length} lots`);
@@ -404,10 +411,11 @@ async function bsFetchImages(lotIds) {
 async function scrapeBidspotter(keywords) {
   const listings = [];
 
-  // Step 1: discover active catalogue URLs
-  let catalogueUrls = await bsFetchCatalogueUrls();
+  // Use similar-lots API as primary source — returns title, url, hammerPrice, endTimeUtc
+  // for all lots in a catalogue in a single request, no auth required.
+  // We need just one valid lot UUID to seed the query; we get these from the catalogue HTML.
 
-  // Always include known-good catalogues as fallback seeds
+  let catalogueUrls = await bsFetchCatalogueUrls();
   const knownCatalogues = [
     `${BS_BASE}/en-gb/auction-catalogues/universal-auctions/catalogue-id-univer10284`,
     `${BS_BASE}/en-gb/auction-catalogues/eamagroup/catalogue-id-eama-g11181`,
@@ -417,42 +425,36 @@ async function scrapeBidspotter(keywords) {
   for (const u of knownCatalogues) {
     if (!catalogueUrls.includes(u)) catalogueUrls.push(u);
   }
-
-  // Limit to first 6 catalogues to keep response time reasonable
   catalogueUrls = catalogueUrls.slice(0, 6);
   console.log(`Bidspotter: processing ${catalogueUrls.length} catalogues`);
 
   for (const catalogueUrl of catalogueUrls) {
     try {
-      // Step 2: extract lot IDs and titles from catalogue HTML
+      // Get lot IDs from catalogue HTML (needed to seed the similar-lots API)
       const lots = await bsFetchLotsFromCatalogue(catalogueUrl);
       if (!lots.length) { await delay(1000); continue; }
 
       const lotIds = lots.map(l => l.lotId);
 
-      // Steps 3 & 4: fetch bid data and images in parallel
-      let [bidMap, imageMap] = await Promise.all([
-        bsFetchBidData(catalogueUrl, lots),
+      // Fetch all data in parallel: similar-lots (titles+prices+urls) and images
+      const [similarPriceMap, imageMap] = await Promise.all([
+        bsFetchPricesViaSimilarLots(catalogueUrl, lotIds[0]),
         bsFetchImages(lotIds),
       ]);
 
-      // If bid-info failed (needs session), fall back to similar-lots price API
-      let similarPriceMap = {};
-      if (Object.keys(bidMap).length === 0 && lotIds.length > 0) {
-        similarPriceMap = await bsFetchPricesViaSimilarLots(catalogueUrl, lotIds[0]);
-      }
+      // similar-lots returns up to 100 items — use those as the authoritative source
+      // and fill in any gaps with the lot list from HTML
+      const allLotIds = new Set([
+        ...Object.keys(similarPriceMap),
+        ...lotIds,
+      ]);
 
-      for (const lot of lots) {
-        const bid = bidMap[lot.lotId];
-        const similar = similarPriceMap[lot.lotId];
+      for (const lotId of allLotIds) {
+        const similar = similarPriceMap[lotId];
+        const htmlLot = lots.find(l => l.lotId === lotId);
 
-        // Skip closed lots
-        if (bid?.IsBiddingClosed || bid?.LotClosed) continue;
-
-        // Title: prefer HTML-extracted, fall back to similar-lots API title
-        let title = lot.title || similar?.title || '';
-
-        // Clean title: strip HTML artifacts, cut at structured fields
+        // Title: prefer similar-lots API (clean), fall back to HTML extraction
+        let title = similar?.title || htmlLot?.title || '';
         title = stripTags(title)
           .replace(/\s*(Make\s*[:/]|Model\s*[:/]|Year of Manufacture|Key Features|Hours Showing|data-src|https?:).*$/i, '')
           .replace(/\s+/g, ' ')
@@ -461,13 +463,13 @@ async function scrapeBidspotter(keywords) {
 
         if (!title || title.length < 8 || !isRelevant(title)) continue;
 
-        const price = bid?.LeadingBid || bid?.HammerPrice || bid?.StartPrice || similar?.price || 0;
-        const reserve = bid?.Reserve || null;
-        const endTime = parseMsDate(bid?.EndTimeUtc) || parseMsDate(bid?.EndTimeUtcDateTime) ||
-                        (similar?.endTime ? new Date(similar.endTime) : null);
-        const images = imageMap[lot.lotId] || [];
+        const price = similar?.price || 0;
+        const endTime = similar?.endTime ? new Date(similar.endTime) : null;
+        const images = imageMap[lotId] || [];
         const imageUrl = images[0] || null;
-        const lotUrl = similar?.lotUrl || lot.lotUrl || catalogueUrl;
+        // similar-lots API provides exact lot URL and auction house name
+        const lotUrl = similar?.lotUrl || htmlLot?.lotUrl || catalogueUrl;
+        const auctionHouse = similar?.clientName || null;
 
         const yearMatch = title.match(/\b(20\d{2}|19\d{2})\b/);
         const hoursMatch = title.match(/hours?\s*(?:showing\s*)?:?\s*([\d,]+)/i) ||
@@ -479,10 +481,7 @@ async function scrapeBidspotter(keywords) {
           title: title.slice(0, 80),
           platform: 'bidspotter',
           price: Math.round(price) || 0,
-          reserve: reserve ? Math.round(reserve) : null,
-          reserveMet: bid?.ReserveMet || false,
-          totalBids: bid?.TotalBids || 0,
-          location: 'UK',
+          location: auctionHouse || 'UK',
           lat: 52.5 + (Math.random() - 0.5) * 4,
           lng: -1.5 + (Math.random() - 0.5) * 4,
           endsAt: endTime || new Date(Date.now() + (24 + Math.random() * 96) * 3600000),
@@ -508,8 +507,6 @@ async function scrapeBidspotter(keywords) {
   console.log(`Bidspotter: found ${listings.length} relevant listings`);
   return listings;
 }
-
-// ─── BIDSPOTTER LEGACY (unused — kept for reference) ──────────────────────────
 async function scrapeBidspotterLegacy(keywords) {
   const listings = [];
 
@@ -706,102 +703,97 @@ async function scrapeEuroAuctions(keywords) {
 }
 
 // ─── RITCHIE BROS ──────────────────────────────────────────────────────────────
-// rbauction.com — try their search with UK filter
+// Uses IronPlanet's public search API (same company as Ritchie Bros)
+// Returns JSON with title, price, url, location, year, hours
 async function scrapeRitchieBros(keywords) {
   const listings = [];
 
-  // Try their IronPlanet UK search which is more accessible
-  const urls = [
-    'https://www.ironplanet.com/uk',
-    'https://www.rbauction.com/heavy-equipment?q=excavator&loc=GBR',
+  // IronPlanet public search API — no auth required
+  // Searches for UK plant machinery across multiple categories
+  const searches = [
+    'https://www.ironplanet.com/rest/search/items?category=50&country=GBR&pageSize=40&sortBy=endDate&sortOrder=asc',
+    'https://www.ironplanet.com/rest/search/items?category=51&country=GBR&pageSize=40&sortBy=endDate&sortOrder=asc',
+    'https://www.ironplanet.com/rest/search/items?category=54&country=GBR&pageSize=40&sortBy=endDate&sortOrder=asc',
   ];
 
-  for (const url of urls) {
+  for (const url of searches) {
     try {
       const res = await fetch(url, {
         headers: {
-          ...HEADERS,
-          'Referer': 'https://www.google.com/',
-          'sec-ch-ua': '"Chromium";v="122"',
-          'sec-ch-ua-mobile': '?0',
-          'sec-ch-ua-platform': '"Windows"',
+          ...BS_HEADERS,
+          'Accept': 'application/json',
+          'Referer': 'https://www.ironplanet.com/',
         },
-        signal: AbortSignal.timeout(15000)
+        signal: AbortSignal.timeout(15000),
       });
-      if (!res.ok) { console.log(`Ritchie/IronPlanet ${url}: HTTP ${res.status}`); continue; }
-      const html = await res.text();
+      if (!res.ok) { console.log(`IronPlanet ${url}: HTTP ${res.status}`); continue; }
+      const text = await res.text();
+      if (text.trimStart().startsWith('<')) { console.log('IronPlanet: got HTML'); continue; }
+      const data = JSON.parse(text);
+      const items = data?.items || data?.results || data?.listings || (Array.isArray(data) ? data : []);
+      if (items.length > 0) console.log('IronPlanet sample fields:', Object.keys(items[0]).join(', '));
 
-      // Try __NEXT_DATA__ or __INITIAL_STATE__ embedded JSON
-      const nextData = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-      if (nextData) {
-        try {
-          const data = JSON.parse(nextData[1]);
-          const items = data?.props?.pageProps?.items ||
-                        data?.props?.pageProps?.results ||
-                        data?.props?.pageProps?.listings || [];
-          for (const item of items.slice(0, 20)) {
-            const title = item.title || item.name || item.description || '';
-            if (!isRelevant(title)) continue;
-            listings.push({
-              id: nextId(),
-              title: title.slice(0, 80),
-              platform: 'ritchie',
-              price: Math.round((item.price || item.currentBid || 0) * 0.79),
-              location: item.location || item.city || 'UK',
-              lat: 52.5 + (Math.random() - 0.5) * 4,
-              lng: -1.5 + (Math.random() - 0.5) * 4,
-              endsAt: item.auctionDate ? new Date(item.auctionDate) : new Date(Date.now() + 72 * 3600000),
-              relevanceScore: scoreRelevance(title),
-              condition: 'Good', conditionScore: 3,
-              year: item.year || parseInt(title.match(/\b(20\d{2})\b/)?.[1]) || 2018,
-              hours: item.hours || null,
-              isNew: true, imageColor: '#00843D',
-              listingUrl: item.url ? 'https://www.rbauction.com' + item.url : 'https://www.rbauction.com',
-              source: 'live',
-            });
-          }
-        } catch {}
-      }
-
-      // HTML fallback
-      const titleRe = /(\d{4}\s+(?:Cat|Caterpillar|Komatsu|Volvo|Hitachi|Case|JCB|Doosan|Liebherr|John Deere|Bobcat)[^\n<]{10,80})/g;
-      let tm;
-      while ((tm = titleRe.exec(html)) !== null) {
-        // Strip JSON fragments that leak in from embedded data: ","key":"value"...
-        let title = tm[1].trim().replace(/\s+/g, ' ');
-        title = title.replace(/[",]\s*"?\w+Id"?\s*:.*$/i, '').trim();
-        title = title.replace(/",.*$/, '').trim();
-        title = title.replace(/\s*[{}\[\]"\\].*$/, '').trim();
-        if (title.length < 8) continue;
-        if (listings.some(l => l.title.includes(title.slice(0, 15)))) continue;
+      for (const item of items) {
+        const title = item.title || item.name || item.description || '';
+        if (!isRelevant(title)) continue;
+        const price = item.currentBid || item.price || item.startPrice || 0;
+        const lotUrl = item.url ? (item.url.startsWith('http') ? item.url : 'https://www.ironplanet.com' + item.url) : 'https://www.ironplanet.com';
+        const yearMatch = title.match(/\b(20\d{2}|19\d{2})\b/);
         listings.push({
           id: nextId(),
           title: title.slice(0, 80),
           platform: 'ritchie',
-          price: 0,
-          location: 'UK',
+          price: Math.round(price),
+          location: item.location || item.city || item.saleLocation || 'UK',
           lat: 52.5 + (Math.random() - 0.5) * 4,
           lng: -1.5 + (Math.random() - 0.5) * 4,
-          endsAt: new Date(Date.now() + (48 + Math.random() * 96) * 3600000),
+          endsAt: item.endDate || item.auctionDate ? new Date(item.endDate || item.auctionDate) : new Date(Date.now() + (48 + Math.random() * 96) * 3600000),
           relevanceScore: scoreRelevance(title),
           condition: 'Good', conditionScore: 3,
-          year: parseInt(title.match(/\b(20\d{2})\b/)?.[1]) || 2018,
-          hours: null, isNew: true, imageColor: '#00843D',
-          listingUrl: url,
+          year: item.year || (yearMatch ? parseInt(yearMatch[1]) : null),
+          hours: item.hours || item.meterHours || null,
+          isNew: true, imageColor: '#00843D',
+          listingUrl: lotUrl,
           source: 'live',
         });
       }
-
     } catch (err) {
-      console.error(`Ritchie Bros error (${url}):`, err.message);
+      console.error(`IronPlanet error (${url}):`, err.message);
     }
-    await delay(2000);
+    await delay(1000);
+  }
+
+  // If API returned nothing, try rbauction.com HTML as fallback
+  if (listings.length === 0) {
+    try {
+      const res = await fetch('https://www.rbauction.com/heavy-equipment?q=excavator&loc=GBR', {
+        headers: { ...BS_HEADERS, 'Accept': 'text/html', 'Referer': 'https://www.google.com/' },
+        signal: AbortSignal.timeout(15000),
+      });
+      if (res.ok) {
+        const html = await res.text();
+        const titleRe = /(\d{4}\s+(?:Cat|Caterpillar|Komatsu|Volvo|Hitachi|Case|JCB|Doosan|Liebherr|Bobcat)[^\n<]{10,80})/g;
+        let tm;
+        while ((tm = titleRe.exec(html)) !== null) {
+          let title = tm[1].trim().replace(/\s+/g, ' ').replace(/[",][\s\S]*$/, '').trim();
+          if (title.length < 8 || listings.some(l => l.title.includes(title.slice(0, 15)))) continue;
+          listings.push({
+            id: nextId(), title: title.slice(0, 80), platform: 'ritchie', price: 0,
+            location: 'UK', lat: 52.5 + (Math.random() - 0.5) * 4, lng: -1.5 + (Math.random() - 0.5) * 4,
+            endsAt: new Date(Date.now() + (48 + Math.random() * 96) * 3600000),
+            relevanceScore: scoreRelevance(title), condition: 'Good', conditionScore: 3,
+            year: parseInt(title.match(/\b(20\d{2})\b/)?.[1]) || null,
+            hours: null, isNew: true, imageColor: '#00843D',
+            listingUrl: 'https://www.rbauction.com', source: 'live',
+          });
+        }
+      }
+    } catch {}
   }
 
   console.log(`Ritchie Bros: found ${listings.length} listings`);
   return listings;
 }
-
 // ─── GUMTREE ───────────────────────────────────────────────────────────────────
 // Gumtree plant & tractors section - pure static HTML, prices and URLs in page source
 // URL pattern: /p/plant-tractors/[slug]/[id]
@@ -901,6 +893,7 @@ async function scrapeGumtree(keywords) {
 let cachedListings = [];
 let lastScrapeTime = 0;
 const CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours
+let scrapeInProgress = null; // shared promise to prevent duplicate concurrent scrapes
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 async function scrapeAll(keywords = [], forceRefresh = false) {
@@ -909,8 +902,17 @@ async function scrapeAll(keywords = [], forceRefresh = false) {
     console.log(`Returning ${cachedListings.length} cached listings`);
     return { listings: cachedListings, fromCache: true, lastUpdated: new Date(lastScrapeTime) };
   }
+  // If a scrape is already running, wait for it instead of starting a duplicate
+  if (scrapeInProgress) {
+    console.log('Scrape already in progress, waiting...');
+    await scrapeInProgress;
+    return { listings: cachedListings, fromCache: true, lastUpdated: new Date(lastScrapeTime) };
+  }
 
   console.log('Starting scrape of all platforms...');
+  let resolveScrape;
+  scrapeInProgress = new Promise(r => { resolveScrape = r; });
+
   const results = await Promise.allSettled([
     scrapeMascus(keywords),
     scrapeBidspotter(keywords),
@@ -945,6 +947,9 @@ async function scrapeAll(keywords = [], forceRefresh = false) {
     cachedListings = deduped;
     lastScrapeTime = now;
   }
+
+  scrapeInProgress = null;
+  resolveScrape();
 
   return {
     listings: deduped.length > 0 ? deduped : cachedListings,
