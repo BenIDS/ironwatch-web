@@ -330,7 +330,7 @@ export default function App() {
   const filtered = listings
     .filter(l => filterPlatform === "all" || l.platform === filterPlatform)
     .filter(l => !filterEnding || isEndingSoon(l.endsAt))
-    .filter(l => (l.price || 0) >= priceRange[0] && (l.price || 0) <= priceRange[1])
+    .filter(l => { const p = l.price || l.guidePrice || 0; return p >= priceRange[0] && p <= priceRange[1]; })
     .filter(l => (l.hours == null) || (l.hours >= hoursRange[0] && l.hours <= hoursRange[1]))
     .filter(l => (l.year || 2018) >= yearRange[0] && (l.year || 2018) <= yearRange[1])
     .filter(l => (l.conditionScore || 3) >= conditionRange[0] && (l.conditionScore || 3) <= conditionRange[1])
@@ -475,7 +475,7 @@ export default function App() {
                     </div>
                     <div style={{ display: "flex", gap: 20, alignItems: "center" }}>
                       <div style={{ textAlign: "right" }}><div style={{ fontFamily: "'Bebas Neue',sans-serif", fontSize: 18, color: "#FF4444" }}>{formatTimeLeft(l.endsAt)}</div><div style={{ fontSize: 9, color: "#5A6478" }}>remaining</div></div>
-                      <div style={{ textAlign: "right" }}><div style={{ fontSize: 15, fontWeight: 500 }}>£{l.price.toLocaleString()}</div><div style={{ fontSize: 9, color: "#00C896" }}>Score {l.relevanceScore}%</div></div>
+                      <div style={{ textAlign: "right" }}><div style={{ fontSize: 15, fontWeight: 500 }}>{l.price > 0 ? <span>{l.platform === 'bidspotter' && <span style={{fontSize:9,color:'#A0A8B8',marginRight:2}}>BID</span>}£{l.price.toLocaleString()}</span> : l.guidePrice > 0 ? <span><span style={{fontSize:9,color:'#5A6478',marginRight:2}}>GUIDE</span>£{l.guidePrice.toLocaleString()}</span> : <span style={{color:'#5A6478'}}>No bids</span>}</div><div style={{ fontSize: 9, color: "#00C896" }}>Score {l.relevanceScore}%</div></div>
                       <button className="abtn" onClick={() => analyseListing(l)} style={{ background: "#FF6B00", color: "#000", padding: "7px 12px", fontSize: 9, fontFamily: "'DM Mono',monospace", letterSpacing: "0.1em", fontWeight: 500, border: "none" }}>ANALYSE →</button>
                     </div>
                   </div>
@@ -570,7 +570,7 @@ export default function App() {
                         <div style={{ fontSize: 10, color: "#5A6478", marginBottom: 10 }}>📍 {listing.location}</div>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
                           <div>
-                            <div style={{ fontFamily: "'Bebas Neue',sans-serif", fontSize: 22, color: "#E0E4EC", lineHeight: 1 }}>£{listing.price.toLocaleString()}</div>
+                            <div style={{ fontFamily: "'Bebas Neue',sans-serif", fontSize: 22, color: "#E0E4EC", lineHeight: 1 }}>{listing.price > 0 ? <><span style={{fontSize:11,color:'#A0A8B8',marginRight:3}}>{listing.platform === 'bidspotter' ? 'BID' : ''}</span>£{listing.price.toLocaleString()}</> : listing.guidePrice > 0 ? <><span style={{fontSize:11,color:'#5A6478',marginRight:3}}>GUIDE</span>£{listing.guidePrice.toLocaleString()}</> : <span style={{fontSize:16,color:'#5A6478'}}>No bids</span>}</div>
                             <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 3 }}>
                               <div style={{ width: 60, background: "#1E2535", height: 3, borderRadius: 2 }}><div style={{ width: `${listing.relevanceScore}%`, background: listing.relevanceScore > 90 ? "#00C896" : "#FF6B00", height: "100%", borderRadius: 2 }} /></div>
                               <span style={{ fontSize: 9, color: listing.relevanceScore > 90 ? "#00C896" : "#FF6B00" }}>{listing.relevanceScore}%</span>
