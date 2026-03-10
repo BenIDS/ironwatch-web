@@ -153,120 +153,299 @@ async function scrapeMascus(keywords) {
   return listings;
 }
 
-// ─── BIDSPOTTER (via Apify) ────────────────────────────────────────────────────
-// Uses getdataforme/bidspotter-auctions-scraper actor on Apify
-// Requires APIFY_TOKEN environment variable on Render
-async function scrapeBidspotter(keywords) {
-  const listings = [];
-  const APIFY_TOKEN = process.env.APIFY_TOKEN;
+// ─── BIDSPOTTER (direct API — no login, no Apify) ─────────────────────────────
+// Uses three undocumented JSON endpoints discovered via browser DevTools:
+//
+//  1. GET  /en-gb/auction-catalogues/[auctioneer]/[catalogue-id]
+//          → HTML page containing lot UUIDs and titles in embedded JSON
+//
+//  2. POST /en-gb/lots-images?take=N&skip=0&imageSize=400
+//          Body: { lotIds: [...uuids] }
+//          → { [lotId]: [imageUrls] }
+//
+//  3. GET  /en-gb/lot/reload-timed-bid-info?v=1.3.0.1&c=catalogue&fullReload=true&count=N
+//          Referer: catalogue page URL
+//          → [{ Model: { LotId, LeadingBid, Reserve, ReserveMet, EndTimeUtc, TotalBids } }]
+//
+// The catalogue list is discovered by scraping the Bidspotter plant/machinery
+// search results page which lists active auctions with their catalogue URLs.
 
-  if (!APIFY_TOKEN) {
-    console.log('Bidspotter: no APIFY_TOKEN set, skipping');
-    return listings;
-  }
+const BS_BASE = 'https://www.bidspotter.co.uk';
+const BS_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
+  'Accept-Language': 'en-GB,en;q=0.9',
+  'Accept-Encoding': 'gzip, deflate, br',
+  'Cache-Control': 'no-cache',
+};
 
+function parseMsDate(val) {
+  // Parses "/Date(1773171480000)/" format
+  if (!val) return null;
+  const m = String(val).match(/\/Date\((\d+)\)\//);
+  return m ? new Date(parseInt(m[1])) : null;
+}
+
+async function bsFetchCatalogueUrls() {
+  // Discover active UK plant & machinery catalogues from search page
+  const searchUrl = `${BS_BASE}/en-gb/for-sale/plant-and-machinery`;
   try {
-    // Start the actor run with UK plant machinery search URLs
-    const startUrls = [
-      { url: 'https://www.bidspotter.co.uk/en-gb/for-sale/plant-and-machinery/excavators' },
-      { url: 'https://www.bidspotter.co.uk/en-gb/for-sale/plant-and-machinery/telehandlers' },
-      { url: 'https://www.bidspotter.co.uk/en-gb/for-sale/plant-and-machinery/dumpers' },
-      { url: 'https://www.bidspotter.co.uk/en-gb/for-sale/plant-and-machinery/loaders' },
-    ];
+    const res = await fetch(searchUrl, {
+      headers: { ...BS_HEADERS, 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) { console.log(`Bidspotter catalogue discovery: HTTP ${res.status}`); return []; }
+    const html = await res.text();
 
-    console.log('Bidspotter: starting Apify actor run...');
-    const runRes = await fetch(
-      `https://api.apify.com/v2/acts/getdataforme~bidspotter-auctions-scraper/runs?token=${APIFY_TOKEN}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          startUrls,
-          maxItems: 100,
-          proxyConfiguration: { useApifyProxy: true },
-        }),
-        signal: AbortSignal.timeout(30000),
+    // Catalogue URLs appear as href="/en-gb/auction-catalogues/[auctioneer]/catalogue-id-[id]"
+    const re = /href="(\/en-gb\/auction-catalogues\/[^/]+\/catalogue-id-[^"]+)"/g;
+    const found = new Set();
+    let m;
+    while ((m = re.exec(html)) !== null) found.add(m[1]);
+    const urls = [...found].map(p => `${BS_BASE}${p}`);
+    console.log(`Bidspotter: discovered ${urls.length} catalogues from search page`);
+    return urls;
+  } catch (err) {
+    console.error('Bidspotter catalogue discovery error:', err.message);
+    return [];
+  }
+}
+
+async function bsFetchLotsFromCatalogue(catalogueUrl) {
+  // Returns array of { lotId, title, lotNumber, lotUrl } extracted from catalogue HTML
+  const lots = [];
+  try {
+    const res = await fetch(catalogueUrl, {
+      headers: {
+        ...BS_HEADERS,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Referer': `${BS_BASE}/en-gb/for-sale/plant-and-machinery`,
+      },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) { console.log(`Bidspotter catalogue ${catalogueUrl}: HTTP ${res.status}`); return lots; }
+    const html = await res.text();
+
+    // Lot UUIDs are embedded in the page as data-lot-id="[uuid]" or similar attributes
+    // Also appear in lot anchor hrefs: /lot-[uuid]  or  href="...lot-[uuid]"
+    const lotIdRe = /["\s](?:data-lot-id|data-id)="([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/gi;
+    // Also pick up UUIDs from lot anchor hrefs
+    const hrefLotRe = /href="(\/en-gb\/auction-catalogues\/[^"]+\/lot-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}))"/gi;
+
+    const seen = new Set();
+
+    let m;
+    while ((m = lotIdRe.exec(html)) !== null) {
+      const lotId = m[1].toLowerCase();
+      if (!seen.has(lotId)) { seen.add(lotId); lots.push({ lotId, lotUrl: `${catalogueUrl}`, title: '' }); }
+    }
+    while ((m = hrefLotRe.exec(html)) !== null) {
+      const lotId = m[2].toLowerCase();
+      const lotUrl = `${BS_BASE}${m[1]}`;
+      if (!seen.has(lotId)) {
+        seen.add(lotId);
+        lots.push({ lotId, lotUrl, title: '' });
+      } else {
+        // Update URL if we already have the lot
+        const existing = lots.find(l => l.lotId === lotId);
+        if (existing) existing.lotUrl = lotUrl;
       }
-    );
-
-    if (!runRes.ok) {
-      console.log(`Bidspotter: Apify run start failed: ${runRes.status}`);
-      return listings;
     }
 
-    const runData = await runRes.json();
-    const runId = runData.data?.id;
-    if (!runId) { console.log('Bidspotter: no run ID returned'); return listings; }
-    console.log(`Bidspotter: actor run started, id=${runId}`);
-
-    // Poll until finished (timeout after 3 minutes)
-    const deadline = Date.now() + 3 * 60 * 1000;
-    let status = 'RUNNING';
-    while (status === 'RUNNING' || status === 'READY') {
-      if (Date.now() > deadline) { console.log('Bidspotter: Apify run timed out'); break; }
-      await delay(8000);
-      const statusRes = await fetch(
-        `https://api.apify.com/v2/actor-runs/${runId}?token=${APIFY_TOKEN}`,
-        { signal: AbortSignal.timeout(10000) }
-      );
-      const statusData = await statusRes.json();
-      status = statusData.data?.status;
-      console.log(`Bidspotter: actor status = ${status}`);
+    // Extract titles — lot titles appear in aria-label, title attr, or heading tags near each lot
+    // Pattern: data-lot-id="[uuid]"...>TITLE</  — grab the nearest h2/h3/strong/span after each UUID
+    // Simpler: extract all lot title text blocks from the page using lot number + title pattern
+    // Bidspotter renders: <span class="lot-number">123</span> ... <span class="lot-title">2018 JCB...</span>
+    const titleBlockRe = /<[^>]+class="[^"]*lot[^"]*title[^"]*"[^>]*>\s*([^<]{5,120})\s*</gi;
+    const titleList = [];
+    while ((m = titleBlockRe.exec(html)) !== null) {
+      const t = stripTags(m[1]).trim().replace(/\s+/g, ' ');
+      if (t.length > 5) titleList.push(t);
     }
 
-    if (status !== 'SUCCEEDED') {
-      console.log(`Bidspotter: actor did not succeed (status=${status})`);
-      return listings;
+    // Also try: <h2 class="...">...</h2> or <h3> within lot cards
+    const headingRe = /<h[23][^>]*class="[^"]*lot[^"]*"[^>]*>\s*([^<]{5,120})\s*<\/h[23]>/gi;
+    while ((m = headingRe.exec(html)) !== null) {
+      const t = stripTags(m[1]).trim().replace(/\s+/g, ' ');
+      if (t.length > 5) titleList.push(t);
     }
 
-    // Fetch results from the dataset
-    const datasetId = runData.data?.defaultDatasetId;
-    const itemsRes = await fetch(
-      `https://api.apify.com/v2/datasets/${datasetId}/items?token=${APIFY_TOKEN}&format=json&limit=200`,
-      { signal: AbortSignal.timeout(15000) }
-    );
-    const items = await itemsRes.json();
-    console.log(`Bidspotter: actor returned ${items.length} raw items`);
+    // Match titles to lots by position (title[i] → lot[i]) — best effort
+    lots.forEach((lot, i) => {
+      if (titleList[i]) lot.title = titleList[i];
+    });
 
-    for (const item of items) {
-      // Map Apify output fields to our listing format
-      // Common field names from auction scrapers: title, name, price, currentBid, url, link, year, hours, location
-      const title = item.title || item.name || item.lotTitle || '';
-      if (!title || !isRelevant(title)) continue;
-
-      const priceRaw = item.price || item.currentBid || item.startingBid || item.estimatedPrice || 0;
-      const price = typeof priceRaw === 'string'
-        ? parseInt(priceRaw.replace(/[^0-9]/g, '')) || 0
-        : (priceRaw || 0);
-
-      const listingUrl = item.url || item.link || item.lotUrl || 'https://www.bidspotter.co.uk';
-      const yearMatch = String(title).match(/\b(20\d{2})\b/);
-      const hoursMatch = String(item.hours || item.hoursUsed || title).match(/([\d,]+)\s*(?:hours?|hrs?)\b/i);
-      const location = item.location || item.saleLocation || item.auctionLocation || 'UK';
-
-      listings.push({
-        id: nextId(),
-        title: String(title).slice(0, 80),
-        platform: 'bidspotter',
-        price,
-        location: String(location).slice(0, 50),
-        lat: 52.5 + (Math.random() - 0.5) * 4,
-        lng: -1.5 + (Math.random() - 0.5) * 4,
-        endsAt: item.endDate ? new Date(item.endDate) : new Date(Date.now() + (24 + Math.random() * 120) * 3600000),
-        relevanceScore: scoreRelevance(title),
-        condition: item.condition || 'Good',
-        conditionScore: 3,
-        year: yearMatch ? parseInt(yearMatch[1]) : (item.year ? parseInt(item.year) : null),
-        hours: hoursMatch ? parseInt(hoursMatch[1].replace(/,/g, '')) : (item.hours ? parseInt(item.hours) : null),
-        isNew: true,
-        imageColor: '#E8500A',
-        listingUrl,
-        source: 'live',
+    // Fallback title extraction: grab ALL text that looks like a plant machinery title
+    // from the full HTML, ordered as they appear on the page
+    if (titleList.length === 0) {
+      const BRANDS = 'JCB|CAT|Caterpillar|Komatsu|Kubota|Hitachi|Kobelco|Volvo|Case|Doosan|Terex|Bobcat|Liebherr|Takeuchi|Thwaites|Manitou|Merlo|Hyundai|Yanmar|Avant|Sany';
+      const machineRe = new RegExp(`((?:20\\d{2}|19\\d{2})\\s+(?:${BRANDS})[^<\\n]{5,100})`, 'gi');
+      const fallbackTitles = [];
+      while ((m = machineRe.exec(html)) !== null) {
+        const t = stripTags(m[1]).trim().replace(/\s+/g, ' ');
+        if (t.length > 8) fallbackTitles.push(t);
+      }
+      lots.forEach((lot, i) => {
+        if (fallbackTitles[i]) lot.title = fallbackTitles[i];
       });
     }
 
+    console.log(`Bidspotter: catalogue ${catalogueUrl.split('/').slice(-1)[0]} → ${lots.length} lots`);
   } catch (err) {
-    console.error('Bidspotter Apify error:', err.message);
+    console.error(`Bidspotter lots error (${catalogueUrl}):`, err.message);
+  }
+  return lots;
+}
+
+async function bsFetchBidData(catalogueUrl, lotCount) {
+  // GET reload-timed-bid-info with Referer = catalogue URL
+  // Returns map of { [lotId]: Model }
+  const bidMap = {};
+  try {
+    const url = `${BS_BASE}/en-gb/lot/reload-timed-bid-info?v=1.3.0.1&c=catalogue&fullReload=true&count=${lotCount}`;
+    const res = await fetch(url, {
+      headers: {
+        ...BS_HEADERS,
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+        'Referer': catalogueUrl,
+        'X-Requested-With': 'XMLHttpRequest',
+      },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) { console.log(`Bidspotter bid-info: HTTP ${res.status}`); return bidMap; }
+    const data = await res.json();
+    if (!Array.isArray(data)) return bidMap;
+    for (const entry of data) {
+      const m = entry?.Model;
+      if (m?.LotId) bidMap[m.LotId.toLowerCase()] = m;
+    }
+    console.log(`Bidspotter: got bid data for ${Object.keys(bidMap).length} lots`);
+  } catch (err) {
+    console.error('Bidspotter bid-info error:', err.message);
+  }
+  return bidMap;
+}
+
+async function bsFetchImages(lotIds) {
+  // POST /en-gb/lots-images with array of lot IDs
+  // Returns { [lotId]: [imageUrl, ...] }
+  const imageMap = {};
+  if (!lotIds.length) return imageMap;
+  try {
+    const res = await fetch(`${BS_BASE}/en-gb/lots-images?take=${lotIds.length}&skip=0&imageSize=400`, {
+      method: 'POST',
+      headers: {
+        ...BS_HEADERS,
+        'Accept': '*/*',
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+      },
+      body: JSON.stringify(lotIds),
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) { console.log(`Bidspotter images: HTTP ${res.status}`); return imageMap; }
+    const data = await res.json();
+    // Response is { [lotId]: [url, ...] }
+    for (const [k, v] of Object.entries(data || {})) {
+      imageMap[k.toLowerCase()] = Array.isArray(v) ? v : [v];
+    }
+  } catch (err) {
+    console.error('Bidspotter images error:', err.message);
+  }
+  return imageMap;
+}
+
+async function scrapeBidspotter(keywords) {
+  const listings = [];
+
+  // Step 1: discover active catalogue URLs
+  let catalogueUrls = await bsFetchCatalogueUrls();
+
+  // Always include known-good catalogues as fallback seeds
+  const knownCatalogues = [
+    `${BS_BASE}/en-gb/auction-catalogues/universal-auctions/catalogue-id-univer10284`,
+    `${BS_BASE}/en-gb/auction-catalogues/eamagroup/catalogue-id-eama-g11181`,
+    `${BS_BASE}/en-gb/auction-catalogues/dunnbros/catalogue-id-dunn-b10036`,
+    `${BS_BASE}/en-gb/auction-catalogues/cambridgeshire-auctions/catalogue-id-camauc10096`,
+  ];
+  for (const u of knownCatalogues) {
+    if (!catalogueUrls.includes(u)) catalogueUrls.push(u);
+  }
+
+  // Limit to first 6 catalogues to keep response time reasonable
+  catalogueUrls = catalogueUrls.slice(0, 6);
+  console.log(`Bidspotter: processing ${catalogueUrls.length} catalogues`);
+
+  for (const catalogueUrl of catalogueUrls) {
+    try {
+      // Step 2: extract lot IDs and titles from catalogue HTML
+      const lots = await bsFetchLotsFromCatalogue(catalogueUrl);
+      if (!lots.length) { await delay(1000); continue; }
+
+      const lotIds = lots.map(l => l.lotId);
+
+      // Steps 3 & 4: fetch bid data and images in parallel
+      const [bidMap, imageMap] = await Promise.all([
+        bsFetchBidData(catalogueUrl, lots.length),
+        bsFetchImages(lotIds),
+      ]);
+
+      for (const lot of lots) {
+        const bid = bidMap[lot.lotId];
+        // Skip closed lots
+        if (bid?.IsBiddingClosed || bid?.LotClosed) continue;
+
+        // Use bid data title if we don't have one from HTML
+        let title = lot.title || '';
+
+        // Clean title: strip HTML artifacts, cut at structured fields
+        title = stripTags(title)
+          .replace(/\s*(Make\s*[:/]|Model\s*[:/]|Year of Manufacture|Key Features|Hours Showing|data-src|https?:).*$/i, '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 100);
+
+        if (!title || title.length < 8 || !isRelevant(title)) continue;
+
+        const price = bid?.LeadingBid || bid?.HammerPrice || bid?.StartPrice || 0;
+        const reserve = bid?.Reserve || null;
+        const endTime = parseMsDate(bid?.EndTimeUtc) || parseMsDate(bid?.EndTimeUtcDateTime);
+        const images = imageMap[lot.lotId] || [];
+        const imageUrl = images[0] || null;
+
+        const yearMatch = title.match(/\b(20\d{2}|19\d{2})\b/);
+        const hoursMatch = title.match(/hours?\s*(?:showing\s*)?:?\s*([\d,]+)/i) ||
+                           title.match(/\*\s*([\d,]+)\s*hours?\s*/i) ||
+                           title.match(/([\d,]+)\s*(?:hours?|hrs?)\b/i);
+
+        listings.push({
+          id: nextId(),
+          title: title.slice(0, 80),
+          platform: 'bidspotter',
+          price: Math.round(price) || 0,
+          reserve: reserve ? Math.round(reserve) : null,
+          reserveMet: bid?.ReserveMet || false,
+          totalBids: bid?.TotalBids || 0,
+          location: 'UK',
+          lat: 52.5 + (Math.random() - 0.5) * 4,
+          lng: -1.5 + (Math.random() - 0.5) * 4,
+          endsAt: endTime || new Date(Date.now() + (24 + Math.random() * 96) * 3600000),
+          relevanceScore: scoreRelevance(title),
+          condition: 'Good',
+          conditionScore: 3,
+          year: yearMatch ? parseInt(yearMatch[1]) : null,
+          hours: hoursMatch ? parseInt(hoursMatch[1].replace(/,/g, '')) : null,
+          isNew: true,
+          imageColor: '#E8500A',
+          imageUrl,
+          listingUrl: lot.lotUrl || catalogueUrl,
+          source: 'live',
+        });
+      }
+
+    } catch (err) {
+      console.error(`Bidspotter catalogue error (${catalogueUrl}):`, err.message);
+    }
+    await delay(1500);
   }
 
   console.log(`Bidspotter: found ${listings.length} relevant listings`);
@@ -673,8 +852,7 @@ async function scrapeAll(keywords = [], forceRefresh = false) {
   const results = await Promise.allSettled([
     scrapeMascus(keywords),
     scrapeBidspotter(keywords),
-    scrapeEuroAuctions(keywords),
-    scrapeGumtree(keywords),
+    scrapeRitchieBros(keywords),
   ]);
 
   const allListings = results
@@ -696,8 +874,7 @@ async function scrapeAll(keywords = [], forceRefresh = false) {
   const perPlatform = {
     mascus: results[0].status === 'fulfilled' ? results[0].value.length : 0,
     bidspotter: results[1].status === 'fulfilled' ? results[1].value.length : 0,
-    euroauctions: results[2].status === 'fulfilled' ? results[2].value.length : 0,
-    gumtree: results[3].status === 'fulfilled' ? results[3].value.length : 0,
+    ritchie: results[2].status === 'fulfilled' ? results[2].value.length : 0,
   };
 
   console.log(`Scrape complete. Found: ${JSON.stringify(perPlatform)}. Total: ${deduped.length}`);
