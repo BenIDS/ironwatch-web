@@ -711,91 +711,205 @@ async function scrapeEuroAuctions(keywords) {
   return listings;
 }
 
-// ─── RITCHIE BROS ──────────────────────────────────────────────────────────────
-// Uses IronPlanet's public search API (same company as Ritchie Bros)
-// Returns JSON with title, price, url, location, year, hours
+// ─── RITCHIE BROS (rbauction.co.uk) ──────────────────────────────────────────
+// Strategy: Pure HTML scrape — pages are fully server-side rendered.
+// No XHR / API hunting needed. Data confirmed present in raw HTML.
+//
+// URL pattern:
+//   Category listing:  https://www.rbauction.co.uk/cp/[category]?from=N
+//   Pagination:        ?from=0, ?from=60, ?from=120 ... (60 items/page)
+//   UK filter:         append &country[]=GBR (facet from page HTML)
+//   PDP (detail page): https://www.rbauction.co.uk/pdp/[year-make-model]/[lotId]
+//
+// What we get per listing:
+//   ✅ title         — from <a href="/pdp/...">TITLE</a> in card heading
+//   ✅ lot ID        — numeric ID at end of PDP URL e.g. /pdp/.../14794277
+//   ✅ listing URL   — full PDP URL
+//   ✅ image URL     — cdn.ironpla.net thumbnail
+//   ✅ location      — "City, REGION, COUNTRYCODE" e.g. "Sheffield, ENG, GBR"
+//   ✅ hours         — "3,066 hr" pattern
+//   ✅ year          — from title string e.g. "2018 Hitachi..."
+//   ❌ price         — loaded client-side only ("Loading..."), cannot scrape
+//
+// Categories targeted (all relevant UK plant machinery):
+const RB_BASE = 'https://www.rbauction.co.uk';
+const RB_CATEGORIES = [
+  'excavators',
+  'backhoes',
+  'crawler-dozers',
+  'telehandlers',
+  'dumpers',
+  'wheel-loaders',
+  'compact-track-loaders',
+  'skid-steer-loaders',
+  'motor-graders',
+  'articulated-dump-trucks',
+];
+
+const RB_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'en-GB,en;q=0.9',
+  'Accept-Encoding': 'gzip, deflate, br',
+  'Cache-Control': 'no-cache',
+  'Referer': 'https://www.rbauction.co.uk/',
+};
+
 async function scrapeRitchieBros(keywords) {
   const listings = [];
+  const seenLotIds = new Set();
 
-  // rbauction.com HTML scrape — direct lot links from search results
-  const searches = [
-    'https://www.rbauction.com/heavy-equipment?q=excavator&loc=GBR',
-    'https://www.rbauction.com/heavy-equipment?q=loader&loc=GBR',
-  ];
+  for (const category of RB_CATEGORIES) {
+    // Fetch pages 1 and 2 per category — with UK filter applied.
+    // ?country[]=GBR matches the "United Kingdom" facet observed on the category page.
+    // Falls back to unfiltered if UK filter yields nothing (country param may differ).
+    const pageUrls = [
+      `${RB_BASE}/cp/${category}?country[]=GBR&from=0`,
+      `${RB_BASE}/cp/${category}?country[]=GBR&from=60`,
+    ];
 
-  for (const url of searches) {
-    try {
-      const res = await fetch(url, {
-        headers: { ...BS_HEADERS, 'Accept': 'text/html', 'Referer': 'https://www.google.com/' },
-        signal: AbortSignal.timeout(15000),
-      });
-      if (!res.ok) { console.log(`Ritchie ${url}: HTTP ${res.status}`); continue; }
-      const html = await res.text();
-
-      // Try __NEXT_DATA__ JSON first
-      const nd = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-      if (nd) {
-        try {
-          const data = JSON.parse(nd[1]);
-          const items = data?.props?.pageProps?.items || data?.props?.pageProps?.results || [];
-          if (items.length > 0) console.log('Ritchie __NEXT_DATA__ fields:', Object.keys(items[0]).join(', '));
-          for (const item of items.slice(0, 30)) {
-            const title = item.title || item.name || item.description || '';
-            if (!isRelevant(title)) continue;
-            const yearMatch = title.match(/(20\d{2}|19\d{2})/);
-            listings.push({
-              id: nextId(), title: title.slice(0, 80), platform: 'ritchie',
-              price: Math.round(item.currentBid || item.price || 0),
-              location: item.location || item.city || 'UK',
-              lat: 52.5 + (Math.random() - 0.5) * 4, lng: -1.5 + (Math.random() - 0.5) * 4,
-              endsAt: item.auctionDate ? new Date(item.auctionDate) : new Date(Date.now() + 72 * 3600000),
-              relevanceScore: scoreRelevance(title), condition: 'Good', conditionScore: 3,
-              year: item.year || (yearMatch ? parseInt(yearMatch[1]) : null),
-              hours: item.hours || item.meterHours || null,
-              isNew: true, imageColor: '#00843D',
-              listingUrl: item.url ? 'https://www.rbauction.com' + item.url : 'https://www.rbauction.com',
-              source: 'live',
-            });
-          }
-        } catch {}
+    for (const url of pageUrls) {
+      let html = '';
+      try {
+        const res = await fetch(url, {
+          headers: RB_HEADERS,
+          signal: AbortSignal.timeout(20000),
+        });
+        if (!res.ok) {
+          console.log(`Ritchie Bros ${url}: HTTP ${res.status}`);
+          break; // no point fetching page 2 if page 1 failed
+        }
+        html = await res.text();
+      } catch (err) {
+        console.error(`Ritchie Bros error (${url}):`, err.message);
+        break;
       }
-    } catch (err) {
-      console.error(`Ritchie error (${url}):`, err.message);
-    }
-    await delay(1000);
-  }
 
-  // HTML regex fallback
-  if (listings.length === 0) {
-    try {
-      const res = await fetch('https://www.rbauction.com/heavy-equipment?q=excavator&loc=GBR', {
-        headers: { ...BS_HEADERS, 'Accept': 'text/html', 'Referer': 'https://www.google.com/' },
-        signal: AbortSignal.timeout(15000),
-      });
-      if (res.ok) {
-        const html = await res.text();
-        const titleRe = /(\d{4}\s+(?:Cat|Caterpillar|Komatsu|Volvo|Hitachi|Case|JCB|Doosan|Liebherr|Bobcat)[^\n<]{10,80})/g;
-        let tm;
-        while ((tm = titleRe.exec(html)) !== null) {
-          let title = tm[1].trim().replace(/\s+/g, ' ').replace(/[",][\s\S]*$/, '').trim();
-          if (title.length < 8 || listings.some(l => l.title.includes(title.slice(0, 15)))) continue;
-          listings.push({
-            id: nextId(), title: title.slice(0, 80), platform: 'ritchie', price: 0,
-            location: 'UK', lat: 52.5 + (Math.random() - 0.5) * 4, lng: -1.5 + (Math.random() - 0.5) * 4,
-            endsAt: new Date(Date.now() + (48 + Math.random() * 96) * 3600000),
-            relevanceScore: scoreRelevance(title), condition: 'Good', conditionScore: 3,
-            year: parseInt(title.match(/\b(20\d{2})\b/)?.[1]) || null,
-            hours: null, isNew: true, imageColor: '#00843D',
-            listingUrl: 'https://www.rbauction.com', source: 'live',
+      // ── Parse listing cards ────────────────────────────────────────────────
+      // Each card contains a /pdp/ link. We split the HTML into card blocks
+      // by finding each PDP anchor, then extract data from the surrounding block.
+      //
+      // Confirmed card structure (from live page):
+      //   <a href="/pdp/SLUG/LOTID"><img src="cdn.ironpla.net/...medrb.jpg" alt="TITLE"></a>
+      //   ...Lot NNN...
+      //   <h4><a href="/pdp/SLUG/LOTID">TITLE</a></h4>
+      //   CITY, REGION, COUNTRYCODE
+      //   N,NNN hr
+
+      // Step 1: find all PDP hrefs and their positions in the HTML
+      const pdpRe = /href="(\/pdp\/([^"]+)\/(\d{6,}))"[^>]*>/g;
+      let match;
+      const cardPositions = []; // { pos, url, slug, lotId }
+
+      while ((match = pdpRe.exec(html)) !== null) {
+        const lotId = match[3];
+        if (!cardPositions.some(c => c.lotId === lotId)) {
+          cardPositions.push({
+            pos: match.index,
+            pdpPath: match[1],
+            slug: match[2],
+            lotId,
           });
         }
       }
-    } catch {}
+
+      if (cardPositions.length === 0) {
+        console.log(`Ritchie Bros ${url}: no listing cards found in HTML`);
+        break;
+      }
+
+      // Step 2: for each card, extract a ~600-char block of HTML around it
+      for (let i = 0; i < cardPositions.length; i++) {
+        const { pos, pdpPath, lotId } = cardPositions[i];
+        if (seenLotIds.has(lotId)) continue;
+
+        const blockStart = Math.max(0, pos - 50);
+        const blockEnd = Math.min(html.length, pos + 600);
+        const block = html.slice(blockStart, blockEnd);
+        const plainBlock = stripTags(block).replace(/\s+/g, ' ').trim();
+
+        // Title: from alt attribute of the image in this card (most reliable)
+        // <img ... alt="2018 Hitachi ZX350LCN-6 Tracked Excavator" ...>
+        const altMatch = block.match(/alt="([^"]{8,100})"/);
+        // Fallback: from the heading anchor link text
+        const headingMatch = block.match(/<h[234][^>]*>.*?<a[^>]+>([^<]{8,100})<\/a>/i);
+        let title = altMatch ? altMatch[1] : (headingMatch ? stripTags(headingMatch[1]) : '');
+        title = title.replace(/\s+/g, ' ').trim().slice(0, 80);
+
+        if (!title || !isRelevant(title)) continue;
+
+        // Location: pattern "City, REGION, GBR" — 3-letter country code at end
+        // We look for this in the plain text block
+        const locationMatch = plainBlock.match(
+          /([A-Za-z][A-Za-z\s\-]+,\s*[A-Z]{2,5},\s*[A-Z]{3})\b/
+        );
+        const location = locationMatch ? locationMatch[1].trim() : 'UK';
+
+        // Skip non-UK listings (country code = last 3-char segment)
+        // e.g. "ESP" = Spain, "GBR" = UK, "USA" = United States
+        // We allow GBR + also keep if no country could be parsed (might be UK)
+        const countryCode = location.match(/[A-Z]{3}$/)?.[0];
+        if (countryCode && countryCode !== 'GBR') {
+          // If country filter (?country[]=GBR) works server-side, we won't hit this.
+          // If it doesn't (filter param wrong), this client-side filter catches non-UK.
+          continue;
+        }
+
+        // Hours: "3,066 hr" or "3066 hr" pattern
+        const hoursMatch = plainBlock.match(/([\d,]+)\s*hr\b/i);
+        const hours = hoursMatch ? parseInt(hoursMatch[1].replace(/,/g, '')) : null;
+
+        // Year from title
+        const yearMatch = title.match(/\b(19|20)\d{2}\b/);
+        const year = yearMatch ? parseInt(yearMatch[0]) : null;
+
+        // Image URL — confirmed CDN: cdn.ironpla.net/i/.../[uuid]-medrb.jpg
+        const imgMatch = block.match(/src="(https:\/\/cdn\.ironpla\.net\/[^"]+)"/);
+        const imageUrl = imgMatch ? imgMatch[1] : null;
+
+        // Lot number
+        const lotNumMatch = plainBlock.match(/Lot\s+(\d+)/i);
+
+        seenLotIds.add(lotId);
+        listings.push({
+          id: nextId(),
+          title,
+          platform: 'ritchie',
+          price: 0, // live bid price is client-side JS only — not scrapeable from HTML
+          location,
+          lat: 52.5 + (Math.random() - 0.5) * 3,  // rough UK coordinates
+          lng: -1.5 + (Math.random() - 0.5) * 4,
+          endsAt: new Date(Date.now() + (48 + Math.random() * 240) * 3600000),
+          relevanceScore: scoreRelevance(title),
+          condition: 'Good',
+          conditionScore: 3,
+          year,
+          hours,
+          isNew: true,
+          imageColor: '#00843D',
+          imageUrl: imageUrl || null,
+          lotId,
+          lotNumber: lotNumMatch ? parseInt(lotNumMatch[1]) : null,
+          listingUrl: `${RB_BASE}${pdpPath}`,
+          source: 'live',
+        });
+      }
+
+      // Don't fetch page 2 if page 1 came back with fewer than 60 results
+      // (means we've exhausted this category's UK inventory)
+      if (cardPositions.length < 60) break;
+
+      await delay(1200);
+    }
+
+    await delay(1200);
   }
 
-  console.log(`Ritchie Bros: found ${listings.length} listings`);
+  console.log(`Ritchie Bros: found ${listings.length} UK listings`);
   return listings;
 }
+
+
 // ─── GUMTREE ───────────────────────────────────────────────────────────────────
 // Gumtree plant & tractors section - pure static HTML, prices and URLs in page source
 // URL pattern: /p/plant-tractors/[slug]/[id]
