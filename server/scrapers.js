@@ -425,8 +425,12 @@ async function scrapeBidspotter(keywords) {
   for (const u of knownCatalogues) {
     if (!catalogueUrls.includes(u)) catalogueUrls.push(u);
   }
-  catalogueUrls = catalogueUrls.slice(0, 6);
-  console.log(`Bidspotter: processing ${catalogueUrls.length} catalogues`);
+  // Prioritise known plant & machinery auctioneers
+  const PLANT_AUCTIONEERS = ['eamagroup', 'universal-auctions', 'dunnbros', 'cambridgeshire', 'liveauctioneers', 'plant'];
+  const prioritised = catalogueUrls.filter(u => PLANT_AUCTIONEERS.some(a => u.includes(a)));
+  const rest = catalogueUrls.filter(u => !PLANT_AUCTIONEERS.some(a => u.includes(a)));
+  catalogueUrls = [...prioritised, ...rest].slice(0, 6);
+  console.log(`Bidspotter: processing ${catalogueUrls.length} catalogues (${prioritised.length} plant priority)`);
 
   for (const catalogueUrl of catalogueUrls) {
     try {
@@ -449,12 +453,16 @@ async function scrapeBidspotter(keywords) {
         ...lotIds,
       ]);
 
+      // Debug: log first 3 titles to verify content
+      const sampleTitles = Object.values(similarPriceMap).slice(0, 3).map(v => v.title || v.description || '(no title)');
+      console.log(`Bidspotter similar-lots sample titles: ${sampleTitles.join(' | ')}`);
+
       for (const lotId of allLotIds) {
         const similar = similarPriceMap[lotId];
         const htmlLot = lots.find(l => l.lotId === lotId);
 
-        // Title: prefer similar-lots API (clean), fall back to HTML extraction
-        let title = similar?.title || htmlLot?.title || '';
+        // Title: prefer similar-lots API (clean), fall back to description then HTML
+        let title = similar?.title || similar?.description || htmlLot?.title || '';
         title = stripTags(title)
           .replace(/\s*(Make\s*[:/]|Model\s*[:/]|Year of Manufacture|Key Features|Hours Showing|data-src|https?:).*$/i, '')
           .replace(/\s+/g, ' ')
@@ -708,62 +716,55 @@ async function scrapeEuroAuctions(keywords) {
 async function scrapeRitchieBros(keywords) {
   const listings = [];
 
-  // IronPlanet public search API — no auth required
-  // Searches for UK plant machinery across multiple categories
+  // rbauction.com HTML scrape — direct lot links from search results
   const searches = [
-    'https://www.ironplanet.com/rest/search/items?category=50&country=GBR&pageSize=40&sortBy=endDate&sortOrder=asc',
-    'https://www.ironplanet.com/rest/search/items?category=51&country=GBR&pageSize=40&sortBy=endDate&sortOrder=asc',
-    'https://www.ironplanet.com/rest/search/items?category=54&country=GBR&pageSize=40&sortBy=endDate&sortOrder=asc',
+    'https://www.rbauction.com/heavy-equipment?q=excavator&loc=GBR',
+    'https://www.rbauction.com/heavy-equipment?q=loader&loc=GBR',
   ];
 
   for (const url of searches) {
     try {
       const res = await fetch(url, {
-        headers: {
-          ...BS_HEADERS,
-          'Accept': 'application/json',
-          'Referer': 'https://www.ironplanet.com/',
-        },
+        headers: { ...BS_HEADERS, 'Accept': 'text/html', 'Referer': 'https://www.google.com/' },
         signal: AbortSignal.timeout(15000),
       });
-      if (!res.ok) { console.log(`IronPlanet ${url}: HTTP ${res.status}`); continue; }
-      const text = await res.text();
-      if (text.trimStart().startsWith('<')) { console.log('IronPlanet: got HTML'); continue; }
-      const data = JSON.parse(text);
-      const items = data?.items || data?.results || data?.listings || (Array.isArray(data) ? data : []);
-      if (items.length > 0) console.log('IronPlanet sample fields:', Object.keys(items[0]).join(', '));
+      if (!res.ok) { console.log(`Ritchie ${url}: HTTP ${res.status}`); continue; }
+      const html = await res.text();
 
-      for (const item of items) {
-        const title = item.title || item.name || item.description || '';
-        if (!isRelevant(title)) continue;
-        const price = item.currentBid || item.price || item.startPrice || 0;
-        const lotUrl = item.url ? (item.url.startsWith('http') ? item.url : 'https://www.ironplanet.com' + item.url) : 'https://www.ironplanet.com';
-        const yearMatch = title.match(/\b(20\d{2}|19\d{2})\b/);
-        listings.push({
-          id: nextId(),
-          title: title.slice(0, 80),
-          platform: 'ritchie',
-          price: Math.round(price),
-          location: item.location || item.city || item.saleLocation || 'UK',
-          lat: 52.5 + (Math.random() - 0.5) * 4,
-          lng: -1.5 + (Math.random() - 0.5) * 4,
-          endsAt: item.endDate || item.auctionDate ? new Date(item.endDate || item.auctionDate) : new Date(Date.now() + (48 + Math.random() * 96) * 3600000),
-          relevanceScore: scoreRelevance(title),
-          condition: 'Good', conditionScore: 3,
-          year: item.year || (yearMatch ? parseInt(yearMatch[1]) : null),
-          hours: item.hours || item.meterHours || null,
-          isNew: true, imageColor: '#00843D',
-          listingUrl: lotUrl,
-          source: 'live',
-        });
+      // Try __NEXT_DATA__ JSON first
+      const nd = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+      if (nd) {
+        try {
+          const data = JSON.parse(nd[1]);
+          const items = data?.props?.pageProps?.items || data?.props?.pageProps?.results || [];
+          if (items.length > 0) console.log('Ritchie __NEXT_DATA__ fields:', Object.keys(items[0]).join(', '));
+          for (const item of items.slice(0, 30)) {
+            const title = item.title || item.name || item.description || '';
+            if (!isRelevant(title)) continue;
+            const yearMatch = title.match(/(20\d{2}|19\d{2})/);
+            listings.push({
+              id: nextId(), title: title.slice(0, 80), platform: 'ritchie',
+              price: Math.round(item.currentBid || item.price || 0),
+              location: item.location || item.city || 'UK',
+              lat: 52.5 + (Math.random() - 0.5) * 4, lng: -1.5 + (Math.random() - 0.5) * 4,
+              endsAt: item.auctionDate ? new Date(item.auctionDate) : new Date(Date.now() + 72 * 3600000),
+              relevanceScore: scoreRelevance(title), condition: 'Good', conditionScore: 3,
+              year: item.year || (yearMatch ? parseInt(yearMatch[1]) : null),
+              hours: item.hours || item.meterHours || null,
+              isNew: true, imageColor: '#00843D',
+              listingUrl: item.url ? 'https://www.rbauction.com' + item.url : 'https://www.rbauction.com',
+              source: 'live',
+            });
+          }
+        } catch {}
       }
     } catch (err) {
-      console.error(`IronPlanet error (${url}):`, err.message);
+      console.error(`Ritchie error (${url}):`, err.message);
     }
     await delay(1000);
   }
 
-  // If API returned nothing, try rbauction.com HTML as fallback
+  // HTML regex fallback
   if (listings.length === 0) {
     try {
       const res = await fetch('https://www.rbauction.com/heavy-equipment?q=excavator&loc=GBR', {
