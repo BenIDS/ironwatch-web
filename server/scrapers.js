@@ -364,8 +364,9 @@ async function bsFetchPricesViaSimilarLots(catalogueUrl, lotId) {
     for (const item of items) {
       const id = (item.lotId || item.id || '').toLowerCase();
       if (id) priceMap[id] = {
-        // hammerPrice = current leading bid on live lots; lowEstimate as fallback
-        price: item.hammerPrice || item.currentBid || item.lowEstimate || item.startPrice || 0,
+        // hammerPrice = live current bid (confirmed). lowEstimate = guide for unbid lots.
+        price: item.hammerPrice || item.currentBid || item.startPrice || 0,
+        guidePrice: item.lowEstimate || null,
         endTime: item.endTimeUtc || item.endDate || null,
         title: item.title || item.description || item.name || '',
         lotUrl: item.url || item.lotUrl || null,
