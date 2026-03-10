@@ -234,21 +234,28 @@ async function bsFetchLotsFromCatalogue(catalogueUrl) {
     const seen = new Set();
 
     let m;
+    // First pass: extract UUIDs from data-lot-id attributes
     while ((m = lotIdRe.exec(html)) !== null) {
       const lotId = m[1].toLowerCase();
-      if (!seen.has(lotId)) { seen.add(lotId); lots.push({ lotId, lotUrl: `${catalogueUrl}`, title: '' }); }
+      if (!seen.has(lotId)) {
+        seen.add(lotId);
+        // Build exact lot URL from catalogue URL + lot UUID
+        // Format: /en-gb/auction-catalogues/[auctioneer]/catalogue-id-[id]/lot-[uuid]
+        const lotUrl = `${catalogueUrl}/lot-${lotId}`;
+        lots.push({ lotId, lotUrl, title: '' });
+      }
     }
+    // Second pass: extract UUIDs from lot hrefs (may find additional ones)
     while ((m = hrefLotRe.exec(html)) !== null) {
       const lotId = m[2].toLowerCase();
       const lotUrl = `${BS_BASE}${m[1]}`;
       if (!seen.has(lotId)) {
         seen.add(lotId);
         lots.push({ lotId, lotUrl, title: '' });
-      } else {
-        // Update URL if we already have the lot
-        const existing = lots.find(l => l.lotId === lotId);
-        if (existing) existing.lotUrl = lotUrl;
       }
+      // href-based URLs are authoritative — always update
+      const existing = lots.find(l => l.lotId === lotId);
+      if (existing) existing.lotUrl = lotUrl;
     }
 
     // Extract titles — lot titles appear in aria-label, title attr, or heading tags near each lot
@@ -296,33 +303,73 @@ async function bsFetchLotsFromCatalogue(catalogueUrl) {
   return lots;
 }
 
-async function bsFetchBidData(catalogueUrl, lotCount) {
-  // GET reload-timed-bid-info with Referer = catalogue URL
-  // Returns map of { [lotId]: Model }
+async function bsFetchBidData(catalogueUrl, lots) {
+  // Per-lot timed-bid-details endpoint — confirmed no login required.
+  // URL: /en-gb/auction-catalogues/[auctioneer]/[catalogue-id]/timed-bid-details-[lotId]
   const bidMap = {};
+  const cataloguePath = catalogueUrl.replace(BS_BASE, '');
+  const toFetch = lots.slice(0, 60);
+
+  for (let i = 0; i < toFetch.length; i += 10) {
+    const batch = toFetch.slice(i, i + 10);
+    await Promise.all(batch.map(async (lot) => {
+      const url = `${BS_BASE}${cataloguePath}/timed-bid-details-${lot.lotId}`;
+      try {
+        const res = await fetch(url, {
+          headers: { ...BS_HEADERS, 'Accept': 'application/json, text/javascript, */*; q=0.01', 'X-Requested-With': 'XMLHttpRequest' },
+          signal: AbortSignal.timeout(10000),
+        });
+        if (!res.ok) return;
+        const text = await res.text();
+        if (text.trimStart().startsWith('<')) return;
+        const data = JSON.parse(text);
+        const model = data?.Model || data;
+        if (model?.LotId) bidMap[model.LotId.toLowerCase()] = model;
+      } catch {}
+    }));
+    if (i + 10 < toFetch.length) await delay(300);
+  }
+
+  console.log(`Bidspotter: got bid data for ${Object.keys(bidMap).length} lots`);
+  return bidMap;
+}
+
+async function bsFetchPricesViaSimilarLots(catalogueUrl, lotId) {
+  // Uses the similar-lots search API which returns hammerPrice + endTime without auth.
+  // We call it once per catalogue using the first lot ID to get all lots in that auction.
+  // URL: /en-gb/auction-catalogues/[auctioneer]/[catalogue-id]/similar-lots/v1/search/[lotId]
+  //      ?culture=en-gb&platformCode=BS&count=100
+  const priceMap = {};
   try {
-    const url = `${BS_BASE}/en-gb/lot/reload-timed-bid-info?v=1.3.0.1&c=catalogue&fullReload=true&count=${lotCount}`;
+    const cataloguePath = catalogueUrl.replace(BS_BASE, '');
+    const url = `${BS_BASE}${cataloguePath}/similar-lots/v1/search/${lotId}?culture=en-gb&platformCode=BS&count=100`;
     const res = await fetch(url, {
       headers: {
         ...BS_HEADERS,
-        'Accept': 'application/json, text/javascript, */*; q=0.01',
+        'Accept': 'application/json',
         'Referer': catalogueUrl,
-        'X-Requested-With': 'XMLHttpRequest',
       },
       signal: AbortSignal.timeout(20000),
     });
-    if (!res.ok) { console.log(`Bidspotter bid-info: HTTP ${res.status}`); return bidMap; }
-    const data = await res.json();
-    if (!Array.isArray(data)) return bidMap;
-    for (const entry of data) {
-      const m = entry?.Model;
-      if (m?.LotId) bidMap[m.LotId.toLowerCase()] = m;
+    if (!res.ok) { console.log(`Bidspotter similar-lots: HTTP ${res.status}`); return priceMap; }
+    const text = await res.text();
+    if (text.trimStart().startsWith('<')) return priceMap;
+    const data = JSON.parse(text);
+    const items = data?.items || data?.results || (Array.isArray(data) ? data : []);
+    for (const item of items) {
+      const id = (item.lotId || item.id || '').toLowerCase();
+      if (id) priceMap[id] = {
+        price: item.hammerPrice || item.currentBid || item.startPrice || 0,
+        endTime: item.endTimeUtc || item.endDate || null,
+        title: item.title || item.description || '',
+        lotUrl: item.url || null,
+      };
     }
-    console.log(`Bidspotter: got bid data for ${Object.keys(bidMap).length} lots`);
+    console.log(`Bidspotter similar-lots: got prices for ${Object.keys(priceMap).length} lots`);
   } catch (err) {
-    console.error('Bidspotter bid-info error:', err.message);
+    console.error('Bidspotter similar-lots error:', err.message);
   }
-  return bidMap;
+  return priceMap;
 }
 
 async function bsFetchImages(lotIds) {
@@ -384,18 +431,26 @@ async function scrapeBidspotter(keywords) {
       const lotIds = lots.map(l => l.lotId);
 
       // Steps 3 & 4: fetch bid data and images in parallel
-      const [bidMap, imageMap] = await Promise.all([
-        bsFetchBidData(catalogueUrl, lots.length),
+      let [bidMap, imageMap] = await Promise.all([
+        bsFetchBidData(catalogueUrl, lots),
         bsFetchImages(lotIds),
       ]);
 
+      // If bid-info failed (needs session), fall back to similar-lots price API
+      let similarPriceMap = {};
+      if (Object.keys(bidMap).length === 0 && lotIds.length > 0) {
+        similarPriceMap = await bsFetchPricesViaSimilarLots(catalogueUrl, lotIds[0]);
+      }
+
       for (const lot of lots) {
         const bid = bidMap[lot.lotId];
+        const similar = similarPriceMap[lot.lotId];
+
         // Skip closed lots
         if (bid?.IsBiddingClosed || bid?.LotClosed) continue;
 
-        // Use bid data title if we don't have one from HTML
-        let title = lot.title || '';
+        // Title: prefer HTML-extracted, fall back to similar-lots API title
+        let title = lot.title || similar?.title || '';
 
         // Clean title: strip HTML artifacts, cut at structured fields
         title = stripTags(title)
@@ -406,11 +461,13 @@ async function scrapeBidspotter(keywords) {
 
         if (!title || title.length < 8 || !isRelevant(title)) continue;
 
-        const price = bid?.LeadingBid || bid?.HammerPrice || bid?.StartPrice || 0;
+        const price = bid?.LeadingBid || bid?.HammerPrice || bid?.StartPrice || similar?.price || 0;
         const reserve = bid?.Reserve || null;
-        const endTime = parseMsDate(bid?.EndTimeUtc) || parseMsDate(bid?.EndTimeUtcDateTime);
+        const endTime = parseMsDate(bid?.EndTimeUtc) || parseMsDate(bid?.EndTimeUtcDateTime) ||
+                        (similar?.endTime ? new Date(similar.endTime) : null);
         const images = imageMap[lot.lotId] || [];
         const imageUrl = images[0] || null;
+        const lotUrl = similar?.lotUrl || lot.lotUrl || catalogueUrl;
 
         const yearMatch = title.match(/\b(20\d{2}|19\d{2})\b/);
         const hoursMatch = title.match(/hours?\s*(?:showing\s*)?:?\s*([\d,]+)/i) ||
@@ -437,7 +494,7 @@ async function scrapeBidspotter(keywords) {
           isNew: true,
           imageColor: '#E8500A',
           imageUrl,
-          listingUrl: lot.lotUrl || catalogueUrl,
+          listingUrl: lotUrl,
           source: 'live',
         });
       }
@@ -710,7 +767,12 @@ async function scrapeRitchieBros(keywords) {
       const titleRe = /(\d{4}\s+(?:Cat|Caterpillar|Komatsu|Volvo|Hitachi|Case|JCB|Doosan|Liebherr|John Deere|Bobcat)[^\n<]{10,80})/g;
       let tm;
       while ((tm = titleRe.exec(html)) !== null) {
-        const title = tm[1].trim().replace(/\s+/g, ' ');
+        // Strip JSON fragments that leak in from embedded data: ","key":"value"...
+        let title = tm[1].trim().replace(/\s+/g, ' ');
+        title = title.replace(/[",]\s*"?\w+Id"?\s*:.*$/i, '').trim();
+        title = title.replace(/",.*$/, '').trim();
+        title = title.replace(/\s*[{}\[\]"\\].*$/, '').trim();
+        if (title.length < 8) continue;
         if (listings.some(l => l.title.includes(title.slice(0, 15)))) continue;
         listings.push({
           id: nextId(),
