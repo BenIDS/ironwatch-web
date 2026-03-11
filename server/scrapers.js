@@ -185,32 +185,101 @@ function parseMsDate(val) {
   return m ? new Date(parseInt(m[1])) : null;
 }
 
+// ─── BIDSPOTTER AUCTIONEER SLUGS ─────────────────────────────────────────────
+// Comprehensive list of UK plant & machinery auctioneers on Bidspotter.
+// Sourced from /en-gb/for-sale/plant-and-machinery auctioneer facet (March 2026).
+// Ordered by lot volume — highest volume plant auctioneers first.
+// Add new slugs here as new auctioneers appear; old inactive ones are harmless.
+const BS_PLANT_AUCTIONEERS = [
+  'eamagroup',              // EAMA Group — dedicated plant & machinery (406 lots)
+  'ncm-auctions',           // NCM Auctions (422 lots)
+  'gateway-auctions',       // Gateway Auctions (352 lots)
+  'clarke-and-simpson',     // Clarke and Simpson (319 lots)
+  'gordon-brothers',        // Gordon Brothers International (319 lots)
+  'husseys',                // Husseys Plant & Machinery (163 lots)
+  'lambert-smith-hampton',  // Lambert Smith Hampton (69 lots)
+  'hilco-valuation-services', // Hilco (83 lots)
+  'eddisons',               // Eddisons (54 lots)
+  'gilbert-baitson',        // Gilbert Baitson (48 lots)
+  'universal-auctions',     // Universal Auctions Group
+  'dunnbros',               // Dunn Bros
+  'gmg-asset-valuation',    // GMG Asset Valuation (16 lots)
+  'brown-and-co',           // Brown & Co (farm/machinery)
+  'charles-taylor-auctioneers', // Charles Taylor (7 lots)
+  'knighton-evans-auctioneers', // Knighton Evans (8 lots)
+  'food-machinery-2000',    // Food Machinery 2000 (22 lots)
+  'norcroft-trading',       // Norcroft Trading
+  'middleton-barton',       // Middleton Barton (7 lots)
+  'ashley-waller-auctioneers', // Ashley Waller
+];
+
 async function bsFetchCatalogueUrls() {
-  const discoveryPages = [
-    `${BS_BASE}/en-gb/for-sale/plant-and-machinery`,
-    `${BS_BASE}/en-gb/auction-catalogues`,
-    `${BS_BASE}/en-gb`,
-  ];
-  const found = new Set();
-  for (const searchUrl of discoveryPages) {
+  // Strategy: hit each known auctioneer's catalogue listing page directly.
+  // Each page only shows their ACTIVE/UPCOMING catalogues — no stale IDs.
+  // This means we always get current catalogue IDs without hardcoding them.
+  //
+  // Auctioneer page URL: /en-gb/auction-catalogues/[slug]
+  // Catalogue links on that page: /en-gb/auction-catalogues/[slug]/catalogue-id-[id]
+  //
+  // We also scrape the main plant/machinery search page as a bonus pass
+  // to catch any auctioneers not yet in our list.
+
+  const found = new Map(); // catalogueUrl → auctioneer slug (for logging)
+  const catalogueRe = /href="(\/en-gb\/auction-catalogues\/([^"\/]+)\/catalogue-id-[^"#?]+)"/g;
+
+  // Pass 1: per-auctioneer pages (most reliable — always current)
+  for (const slug of BS_PLANT_AUCTIONEERS) {
+    const auctioneerUrl = `${BS_BASE}/en-gb/auction-catalogues/${slug}`;
     try {
-      const res = await fetch(searchUrl, {
+      const res = await fetch(auctioneerUrl, {
         headers: { ...BS_HEADERS, 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
-        signal: AbortSignal.timeout(20000),
+        signal: AbortSignal.timeout(15000),
       });
-      if (!res.ok) continue;
+      if (!res.ok) {
+        if (res.status !== 404) console.log(`Bidspotter auctioneer ${slug}: HTTP ${res.status}`);
+        await delay(300);
+        continue;
+      }
       const html = await res.text();
-      const re = /href="(\/en-gb\/auction-catalogues\/[^\/"]+\/catalogue-id-[^"#?]+)"/g;
       let m;
-      while ((m = re.exec(html)) !== null) found.add(m[1]);
-      if (found.size > 0) break;
+      let count = 0;
+      catalogueRe.lastIndex = 0;
+      while ((m = catalogueRe.exec(html)) !== null) {
+        if (!found.has(m[1])) {
+          found.set(m[1], slug);
+          count++;
+        }
+      }
+      if (count > 0) console.log(`Bidspotter: ${slug} → ${count} active catalogue(s)`);
     } catch (err) {
-      console.error('Bidspotter catalogue discovery error:', err.message);
+      console.error(`Bidspotter auctioneer ${slug} error:`, err.message);
     }
-    await delay(500);
+    await delay(400);
   }
-  const urls = [...found].map(p => `${BS_BASE}${p}`);
-  console.log(`Bidspotter: discovered ${urls.length} catalogues`);
+
+  // Pass 2: main plant/machinery search page — catches auctioneers not in our list
+  try {
+    const res = await fetch(`${BS_BASE}/en-gb/for-sale/plant-and-machinery`, {
+      headers: { ...BS_HEADERS, 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (res.ok) {
+      const html = await res.text();
+      let m;
+      catalogueRe.lastIndex = 0;
+      while ((m = catalogueRe.exec(html)) !== null) {
+        if (!found.has(m[1])) {
+          found.set(m[1], m[2]); // slug from URL
+          console.log(`Bidspotter: discovered new auctioneer via search page: ${m[2]}`);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Bidspotter search page error:', err.message);
+  }
+
+  const urls = [...found.keys()].map(p => `${BS_BASE}${p}`);
+  console.log(`Bidspotter: discovered ${urls.length} total active catalogues across ${new Set(found.values()).size} auctioneers`);
   return urls;
 }
 
@@ -416,22 +485,14 @@ async function scrapeBidspotter(keywords) {
   // for all lots in a catalogue in a single request, no auth required.
   // We need just one valid lot UUID to seed the query; we get these from the catalogue HTML.
 
-  let catalogueUrls = await bsFetchCatalogueUrls();
-  const knownCatalogues = [
-    `${BS_BASE}/en-gb/auction-catalogues/universal-auctions/catalogue-id-univer10284`,
-    `${BS_BASE}/en-gb/auction-catalogues/eamagroup/catalogue-id-eama-g11181`,
-    `${BS_BASE}/en-gb/auction-catalogues/dunnbros/catalogue-id-dunn-b10036`,
-    `${BS_BASE}/en-gb/auction-catalogues/cambridgeshire-auctions/catalogue-id-camauc10096`,
-  ];
-  for (const u of knownCatalogues) {
-    if (!catalogueUrls.includes(u)) catalogueUrls.push(u);
+  // Discovery now hits every auctioneer's own page — no hardcoded catalogue IDs.
+  // All returned URLs are currently active. Process all of them.
+  const catalogueUrls = await bsFetchCatalogueUrls();
+  if (!catalogueUrls.length) {
+    console.log('Bidspotter: no active catalogues found');
+    return listings;
   }
-  // Prioritise known plant & machinery auctioneers
-  const PLANT_AUCTIONEERS = ['eamagroup', 'universal-auctions', 'dunnbros', 'cambridgeshire', 'liveauctioneers', 'plant'];
-  const prioritised = catalogueUrls.filter(u => PLANT_AUCTIONEERS.some(a => u.includes(a)));
-  const rest = catalogueUrls.filter(u => !PLANT_AUCTIONEERS.some(a => u.includes(a)));
-  catalogueUrls = [...prioritised, ...rest].slice(0, 6);
-  console.log(`Bidspotter: processing ${catalogueUrls.length} catalogues (${prioritised.length} plant priority)`);
+  console.log(`Bidspotter: processing ${catalogueUrls.length} active catalogues`);
 
   for (const catalogueUrl of catalogueUrls) {
     try {
